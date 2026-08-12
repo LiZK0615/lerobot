@@ -59,6 +59,16 @@ def test_configure_qt_font_dir_uses_first_existing_candidate(tmp_path):
     assert environ["QT_QPA_FONTDIR"] == str(fonts)
 
 
+def test_configure_qt_font_dir_replaces_nonexistent_opencv_path(tmp_path):
+    fonts = tmp_path / "fonts"
+    fonts.mkdir()
+    environ = {"QT_QPA_FONTDIR": str(tmp_path / "cv2" / "qt" / "fonts")}
+
+    configure_qt_font_dir(environ, (fonts,))
+
+    assert environ["QT_QPA_FONTDIR"] == str(fonts)
+
+
 def test_preview_gui_failure_disables_preview_and_exposes_failure():
     frames = {name: np.zeros((10, 10, 3), dtype=np.uint8) for name in ("head", "left_wrist", "right_wrist")}
     preview = CameraPreview(True, cv2_module=FakeCv2(fail=True))

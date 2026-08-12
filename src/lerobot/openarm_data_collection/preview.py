@@ -18,7 +18,8 @@ QT_FONT_CANDIDATES = (
 
 
 def configure_qt_font_dir(environ=os.environ, candidates=QT_FONT_CANDIDATES) -> None:
-    if environ.get("QT_QPA_FONTDIR"):
+    configured = environ.get("QT_QPA_FONTDIR")
+    if configured and Path(configured).is_dir():
         return
     for candidate in candidates:
         if candidate.is_dir():
