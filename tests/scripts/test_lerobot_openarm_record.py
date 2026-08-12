@@ -67,3 +67,35 @@ def test_feedback_reports_lifecycle_progress_and_failures(capsys):
     assert "[RECORDING] episode=0 started" in output
     assert "elapsed=1.0s" in output and "effective_fps=1.0" in output
     assert "[FAILED] episode=0 camera skew exceeded" in output
+
+
+def test_feedback_reports_same_failure_again_in_a_new_episode(capsys):
+    from lerobot.scripts.lerobot_openarm_record import RecorderFeedback
+    from lerobot.openarm_data_collection.session import RecordingSession
+
+    class Sink:
+        total_episodes = 0
+        def begin_episode(self, task): return 0
+        def add_sample(self, sample): pass
+        def save_episode(self): return 0
+        def discard_episode(self): pass
+        def finalize(self): pass
+
+    class Sync:
+        def select(self, now): return object()
+        def health(self, now): return type("Health", (), {"fatal": False, "reason": None})()
+
+    session = RecordingSession(Sink(), Sync(), "任务", min_episode_sec=0.0)
+    feedback = RecorderFeedback("/tmp/data/task")
+    reason = "camera skew exceeded: actual=48.0ms limit=35.0ms"
+
+    feedback.handle_key(session, "r", 1_000_000_000)
+    session.mark_invalid(reason)
+    feedback.observe(session, 1_100_000_000)
+    feedback.handle_key(session, "d", 1_200_000_000)
+    feedback.handle_key(session, "r", 2_000_000_000)
+    session.mark_invalid(reason)
+    feedback.observe(session, 2_100_000_000)
+
+    output = capsys.readouterr().out
+    assert output.count("[FAILED] episode=0 camera skew exceeded") == 2

@@ -86,6 +86,7 @@ class RecorderFeedback:
             return
         after = session.status(now_ns)
         if key == "r":
+            self._failed_reason = None
             print(f"[RECORDING] episode={after.episode_index} started", flush=True)
             self._last_progress_ns = now_ns
         elif key == "s":
