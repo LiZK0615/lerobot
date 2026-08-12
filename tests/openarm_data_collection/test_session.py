@@ -42,3 +42,13 @@ def test_q_only_from_ready():
     session = RecordingSession(Sink(), Sync(), "任务")
     session.handle_key("r", 0)
     with pytest.raises(InvalidTransition): session.handle_key("q", 1)
+
+
+def test_status_exposes_episode_elapsed_and_effective_fps():
+    session = RecordingSession(Sink(), Sync(), "任务", min_episode_sec=0.0)
+    session.handle_key("r", 1_000_000_000)
+    session.tick(1_033_333_333)
+    status = session.status(3_000_000_000)
+    assert status.episode_index == 0
+    assert status.elapsed_sec == 2.0
+    assert status.effective_fps == 0.5

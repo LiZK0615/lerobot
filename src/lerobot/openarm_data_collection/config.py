@@ -27,6 +27,7 @@ class OpenArmRecordConfig:
     max_episode_sec: float = 120.0
     record_command_diagnostics: bool = False
     ros_udp_port: int = 15001
+    display_cameras: bool = False
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", self.dataset_name):

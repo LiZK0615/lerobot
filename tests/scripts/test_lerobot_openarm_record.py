@@ -21,3 +21,49 @@ def test_console_script_is_registered():
 def test_script_exposes_main():
     from lerobot.scripts.lerobot_openarm_record import main
     assert callable(main)
+
+
+def test_cli_defaults_to_no_camera_display():
+    from lerobot.scripts.lerobot_openarm_record import OpenArmRecordCliConfig
+
+    cfg = OpenArmRecordCliConfig("/tmp/data", "task", "任务", "rig.yaml")
+    assert cfg.display_cameras is False
+    assert cfg.core().display_cameras is False
+
+
+def test_cli_passes_camera_display_to_core_config():
+    from lerobot.scripts.lerobot_openarm_record import OpenArmRecordCliConfig
+
+    cfg = OpenArmRecordCliConfig("/tmp/data", "task", "任务", "rig.yaml", display_cameras=True)
+    assert cfg.core().display_cameras is True
+
+
+def test_feedback_reports_lifecycle_progress_and_failures(capsys):
+    from lerobot.scripts.lerobot_openarm_record import RecorderFeedback
+    from lerobot.openarm_data_collection.session import RecordingSession
+
+    class Sink:
+        total_episodes = 0
+        def begin_episode(self, task): return 0
+        def add_sample(self, sample): pass
+        def save_episode(self): return 0
+        def discard_episode(self): pass
+        def finalize(self): pass
+
+    class Sync:
+        def select(self, now): return object()
+        def health(self, now): return type("Health", (), {"fatal": False, "reason": None})()
+
+    session = RecordingSession(Sink(), Sync(), "任务", min_episode_sec=0.0)
+    feedback = RecorderFeedback("/tmp/data/task", progress_interval_sec=1.0)
+    feedback.ready(session)
+    feedback.handle_key(session, "r", 1_000_000_000)
+    session.tick(1_033_333_333)
+    feedback.observe(session, 2_000_000_000)
+    session.mark_invalid("camera skew exceeded: actual=48.0ms limit=35.0ms")
+    feedback.observe(session, 2_100_000_000)
+    output = capsys.readouterr().out
+    assert "[READY]" in output
+    assert "[RECORDING] episode=0 started" in output
+    assert "elapsed=1.0s" in output and "effective_fps=1.0" in output
+    assert "[FAILED] episode=0 camera skew exceeded" in output

@@ -10,8 +10,9 @@ import draccus
 from lerobot.cameras.orbbec import OrbbecCamera, OrbbecSdkRuntime
 from lerobot.openarm_data_collection.config import OpenArmRecordConfig, load_camera_rig, validate_storage
 from lerobot.openarm_data_collection.dataset_sink import DatasetSink
+from lerobot.openarm_data_collection.preview import CameraPreview
 from lerobot.openarm_data_collection.ros_receiver import RosSnapshotReceiver
-from lerobot.openarm_data_collection.session import InvalidTransition, RecordingSession, SessionState
+from lerobot.openarm_data_collection.session import RecordingSession, SessionState
 from lerobot.openarm_data_collection.terminal import TerminalKeys
 from lerobot.openarm_data_collection.time_sync import DeviceClockMapper, SampleSynchronizer
 
@@ -29,6 +30,7 @@ class OpenArmRecordCliConfig:
     max_episode_sec: float = 120.0
     record_command_diagnostics: bool = False
     ros_udp_port: int = 15001
+    display_cameras: bool = False
 
     def core(self) -> OpenArmRecordConfig:
         return OpenArmRecordConfig(
@@ -43,7 +45,74 @@ class OpenArmRecordCliConfig:
             max_episode_sec=self.max_episode_sec,
             record_command_diagnostics=self.record_command_diagnostics,
             ros_udp_port=self.ros_udp_port,
+            display_cameras=self.display_cameras,
         )
+
+
+class RecorderFeedback:
+    def __init__(self, dataset_path: str, progress_interval_sec: float = 1.0) -> None:
+        self.dataset_path = dataset_path
+        self.progress_interval_ns = round(progress_interval_sec * 1_000_000_000)
+        self._last_state: SessionState | None = None
+        self._last_progress_ns: int | None = None
+        self._failed_reason: str | None = None
+
+    def ready(self, session: RecordingSession) -> None:
+        print(f"[READY] next_episode={session.sink.total_episodes} [r] record [q] finalize", flush=True)
+        self._last_state = session.state
+
+    @staticmethod
+    def status_text(session: RecordingSession, now_ns: int) -> str:
+        status = session.status(now_ns)
+        text = status.state.value
+        if status.episode_index is not None:
+            text += f" episode={status.episode_index} elapsed={status.elapsed_sec:.1f}s frames={status.frames} skipped={status.skipped}"
+        if status.reason:
+            text += f" FAILED: {status.reason}"
+        return text
+
+    def handle_key(self, session: RecordingSession, key: str, now_ns: int) -> None:
+        before = session.status(now_ns)
+        try:
+            if key == "s" and before.state is SessionState.RECORDING:
+                print(
+                    f"[SAVING] episode={before.episode_index} frames={before.frames} "
+                    f"duration={before.elapsed_sec:.1f}s encoding videos",
+                    flush=True,
+                )
+            session.handle_key(key, now_ns)
+        except Exception as error:
+            print(f"[FAILED] key={key} state={before.state.value} reason={error}", flush=True)
+            return
+        after = session.status(now_ns)
+        if key == "r":
+            print(f"[RECORDING] episode={after.episode_index} started", flush=True)
+            self._last_progress_ns = now_ns
+        elif key == "s":
+            print(f"[SAVED] episode={before.episode_index} path={self.dataset_path}", flush=True)
+            self.ready(session)
+        elif key == "d":
+            print(f"[DISCARDED] episode={before.episode_index}", flush=True)
+            self.ready(session)
+        elif key == "q":
+            print(f"[FINALIZED] path={self.dataset_path}", flush=True)
+        self._last_state = after.state
+
+    def observe(self, session: RecordingSession, now_ns: int) -> None:
+        status = session.status(now_ns)
+        if status.state is SessionState.INVALID and status.reason != self._failed_reason:
+            print(f"[FAILED] episode={status.episode_index} {status.reason}; press d to discard", flush=True)
+            self._failed_reason = status.reason
+        if status.state is SessionState.RECORDING and (
+            self._last_progress_ns is None or now_ns - self._last_progress_ns >= self.progress_interval_ns
+        ):
+            print(
+                f"[RECORDING] episode={status.episode_index} elapsed={status.elapsed_sec:.1f}s "
+                f"frames={status.frames} skipped={status.skipped} effective_fps={status.effective_fps:.1f}",
+                flush=True,
+            )
+            self._last_progress_ns = now_ns
+        self._last_state = status.state
 
 
 def run(cfg: OpenArmRecordCliConfig) -> None:
@@ -64,12 +133,15 @@ def run(cfg: OpenArmRecordCliConfig) -> None:
         sink, synchronizer, cfg.task, cfg.fps,
         cfg.min_episode_sec, cfg.max_episode_sec
     )
+    feedback = RecorderFeedback(str(cfg.dataset_path))
+    preview = CameraPreview(cfg.display_cameras)
     last_camera_sequence = {name: -1 for name in cameras}
+    latest_images = {}
     closed = False
 
     try:
         for camera in cameras.values(): camera.connect()
-        print("READY  [r] record  [s] save  [d] discard  [q] finalize")
+        feedback.ready(session)
         with TerminalKeys() as keys:
             while session.state is not SessionState.EXITED:
                 now_ns = time.monotonic_ns()
@@ -79,22 +151,28 @@ def run(cfg: OpenArmRecordCliConfig) -> None:
                     packet = camera.read_latest_packet()
                     if packet is None or packet.sequence == last_camera_sequence[name]: continue
                     last_camera_sequence[name] = packet.sequence
+                    latest_images[name] = packet.image
                     try:
                         mapped = mappers[name].update(packet.device_timestamp_us, packet.received_monotonic_ns)
                         synchronizer.push_camera(name, replace(packet, mapped_monotonic_ns=mapped))
-                    except ValueError:
-                        session.mark_invalid(f"{name} timestamp mapping failed")
-                key = keys.poll()
-                if key:
-                    try: session.handle_key(key, now_ns)
-                    except InvalidTransition as error: print(f"Ignored key: {error}")
+                    except ValueError as error:
+                        session.mark_invalid(f"{name} timestamp mapping failed: {error}")
+                terminal_key = keys.poll()
+                window_key = preview.poll(latest_images, feedback.status_text(session, now_ns))
+                if preview.failure:
+                    print(f"[FAILED] camera_preview reason={preview.failure}; preview disabled", flush=True)
+                    preview.failure = None
+                key = terminal_key or window_key
+                if key: feedback.handle_key(session, key, now_ns)
                 session.tick(now_ns)
+                feedback.observe(session, now_ns)
                 time.sleep(0.002)
     except KeyboardInterrupt:
         if session.state in (SessionState.RECORDING, SessionState.INVALID): sink.discard_episode()
     finally:
         try: sink.finalize()
         finally:
+            preview.close()
             receiver.close()
             for camera in cameras.values():
                 if camera.is_connected: camera.disconnect()

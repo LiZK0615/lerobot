@@ -93,13 +93,26 @@ class SampleSynchronizer:
                 if frame.sequence > self._last_consumed[name] and frame.mapped_monotonic_ns is not None
             ]
             candidate = self._nearest(candidates, sample_monotonic_ns, lambda item: item.mapped_monotonic_ns)
-            if candidate is None or abs(sample_monotonic_ns - candidate.mapped_monotonic_ns) > self.camera_age_ns:
-                self._fail(sample_monotonic_ns, f"{name} missing or stale")
+            if candidate is None:
+                self._fail(sample_monotonic_ns, f"{name} missing")
+                return None
+            age_ns = abs(sample_monotonic_ns - candidate.mapped_monotonic_ns)
+            if age_ns > self.camera_age_ns:
+                self._fail(
+                    sample_monotonic_ns,
+                    f"{name} stale: age={age_ns / 1_000_000:.1f}ms "
+                    f"limit={self.camera_age_ns / 1_000_000:.1f}ms",
+                )
                 return None
             selected[name] = candidate
         times = [frame.mapped_monotonic_ns for frame in selected.values()]
-        if max(times) - min(times) > self.camera_skew_ns:
-            self._fail(sample_monotonic_ns, "camera skew exceeded")
+        skew_ns = max(times) - min(times)
+        if skew_ns > self.camera_skew_ns:
+            self._fail(
+                sample_monotonic_ns,
+                f"camera skew exceeded: actual={skew_ns / 1_000_000:.1f}ms "
+                f"limit={self.camera_skew_ns / 1_000_000:.1f}ms",
+            )
             return None
         reference_ns = sorted(times)[1]
         snapshot = self._nearest(self._snapshots, reference_ns, lambda item: item.sent_monotonic_ns)
@@ -108,8 +121,19 @@ class SampleSynchronizer:
             return None
         state_age = abs(reference_ns - snapshot.state.received_monotonic_ns)
         action_age = abs(reference_ns - snapshot.action.received_monotonic_ns)
-        if state_age > self.state_age_ns or action_age > self.action_age_ns:
-            self._fail(sample_monotonic_ns, "state or action stale")
+        if state_age > self.state_age_ns:
+            self._fail(
+                sample_monotonic_ns,
+                f"state stale: age={state_age / 1_000_000:.1f}ms "
+                f"limit={self.state_age_ns / 1_000_000:.1f}ms",
+            )
+            return None
+        if action_age > self.action_age_ns:
+            self._fail(
+                sample_monotonic_ns,
+                f"action stale: age={action_age / 1_000_000:.1f}ms "
+                f"limit={self.action_age_ns / 1_000_000:.1f}ms",
+            )
             return None
         for name, frame in selected.items():
             self._last_consumed[name] = frame.sequence

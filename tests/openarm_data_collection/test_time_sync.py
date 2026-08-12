@@ -48,12 +48,25 @@ def test_rejects_skew_and_stale_sources_at_boundaries():
     sync = SampleSynchronizer()
     push_complete(sync, 1_000_000_000, skew=36_000_000)
     assert sync.select(1_000_000_000) is None
+    assert sync.health(1_000_000_000).reason == "camera skew exceeded: actual=36.0ms limit=35.0ms"
     sync = SampleSynchronizer()
     push_complete(sync, 1_000_000_000, skew=35_000_000)
     assert sync.select(1_000_000_000) is not None
     sync = SampleSynchronizer()
     push_complete(sync, 1_000_000_000)
     assert sync.select(1_105_000_001) is None
+    assert sync.health(1_105_000_001).reason == "head stale: age=110.0ms limit=100.0ms"
+
+
+def test_reports_state_and_action_age_with_actual_limits():
+    sync = SampleSynchronizer()
+    target = 1_000_000_000
+    push_complete(sync, target)
+    old = TimedVector((0.0,) * 16, target - 60_000_000, None)
+    sync._snapshots.clear()
+    sync.push_snapshot(RecordingSnapshot(2, target, old, old, None))
+    assert sync.select(target) is None
+    assert sync.health(target).reason == "state stale: age=60.0ms limit=50.0ms"
 
 
 def test_health_becomes_fatal_after_half_second():
