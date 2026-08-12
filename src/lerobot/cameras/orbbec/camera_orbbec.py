@@ -120,6 +120,13 @@ class OrbbecSdkRuntime:
             device = self.adapter.list_devices().get(config.serial_number)
             if device is None:
                 raise RuntimeError(f"Orbbec serial {config.serial_number} was not found")
+            expected_model = config.model.replace("_", " ")
+            actual_model = device.get("model", "").lower().replace("_", " ")
+            if expected_model not in actual_model:
+                raise RuntimeError(
+                    f"Orbbec serial {config.serial_number} model mismatch: "
+                    f"expected {config.model}, got {device.get('model', '')}"
+                )
             self._claimed.add(config.serial_number)
         try:
             return self.adapter.start(config, callback)

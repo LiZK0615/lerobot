@@ -128,3 +128,11 @@ def test_runtime_rejects_duplicate_claim():
     with pytest.raises(RuntimeError, match="already claimed"):
         second.connect(warmup=False)
     first.disconnect()
+
+
+def test_runtime_rejects_serial_with_wrong_model():
+    adapter = FakeAdapter()
+    adapter.devices["336-head"]["model"] = "orbbec gemini 305"
+    camera = OrbbecCamera(head_config(), OrbbecSdkRuntime(adapter))
+    with pytest.raises(RuntimeError, match="model mismatch"):
+        camera.connect(warmup=False)
