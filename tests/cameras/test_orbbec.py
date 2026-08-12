@@ -9,6 +9,7 @@ from lerobot.cameras.orbbec import (
     OrbbecSdkRuntime,
     RawOrbbecFrame,
 )
+from lerobot.cameras.orbbec.camera_orbbec import _sdk_stream_type, _select_video_profile
 from lerobot.cameras.utils import make_cameras_from_configs
 
 
@@ -136,3 +137,37 @@ def test_runtime_rejects_serial_with_wrong_model():
     camera = OrbbecCamera(head_config(), OrbbecSdkRuntime(adapter))
     with pytest.raises(RuntimeError, match="model mismatch"):
         camera.connect(warmup=False)
+
+
+def test_sdk_stream_type_uses_pyorbbecsdk2_member_names():
+    class StreamType:
+        COLOR_STREAM = 1
+        LEFT_COLOR_STREAM = 2
+        RIGHT_COLOR_STREAM = 3
+
+    assert _sdk_stream_type(StreamType, "color") == 1
+    assert _sdk_stream_type(StreamType, "left_color") == 2
+    assert _sdk_stream_type(StreamType, "right_color") == 3
+
+
+def test_select_video_profile_tries_supported_color_formats_in_order():
+    class Format:
+        RGB = "rgb"
+        BGR = "bgr"
+        MJPG = "mjpg"
+        YUYV = "yuyv"
+        YUY2 = "yuy2"
+
+    class Profiles:
+        def __init__(self):
+            self.calls = []
+
+        def get_video_stream_profile(self, width, height, pixel_format, fps):
+            self.calls.append(pixel_format)
+            if pixel_format != Format.MJPG:
+                raise RuntimeError("unsupported")
+            return (width, height, pixel_format, fps)
+
+    profiles = Profiles()
+    assert _select_video_profile(profiles, Format, 640, 480, 30) == (640, 480, "mjpg", 30)
+    assert profiles.calls == [Format.RGB, Format.BGR, Format.MJPG]

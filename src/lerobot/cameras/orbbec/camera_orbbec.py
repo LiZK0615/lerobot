@@ -17,6 +17,31 @@ from ..camera import Camera
 from .configuration_orbbec import OrbbecCameraConfig
 
 
+def _sdk_stream_type(stream_type_enum: Any, selected_color_stream: str) -> Any:
+    """Map our stable stream names to pyorbbecsdk2's v2 enum members."""
+    return {
+        "color": stream_type_enum.COLOR_STREAM,
+        "left_color": stream_type_enum.LEFT_COLOR_STREAM,
+        "right_color": stream_type_enum.RIGHT_COLOR_STREAM,
+    }[selected_color_stream]
+
+
+def _select_video_profile(profiles: Any, format_enum: Any, width: int, height: int, fps: int) -> Any:
+    """Select the requested profile while preferring formats cheap to convert to RGB."""
+    errors: list[str] = []
+    for format_name in ("RGB", "BGR", "MJPG", "YUYV", "YUY2"):
+        pixel_format = getattr(format_enum, format_name, None)
+        if pixel_format is None:
+            continue
+        try:
+            return profiles.get_video_stream_profile(width, height, pixel_format, fps)
+        except RuntimeError as error:
+            errors.append(f"{format_name}: {error}")
+    raise RuntimeError(
+        f"no supported Orbbec color profile for {width}x{height}@{fps}; " + "; ".join(errors)
+    )
+
+
 @dataclass(frozen=True)
 class RawOrbbecFrame:
     image: NDArray[np.uint8]
@@ -74,26 +99,34 @@ class _PyOrbbecAdapter:
             device.load_preset(config.preset)
         pipeline = ob.Pipeline(device)
         pipeline_config = ob.Config()
-        stream_type = {
-            "color": ob.OBStreamType.COLOR,
-            "left_color": ob.OBStreamType.LEFT_COLOR,
-            "right_color": ob.OBStreamType.RIGHT_COLOR,
-        }[config.selected_color_stream]
+        stream_type = _sdk_stream_type(ob.OBStreamType, config.selected_color_stream)
         profiles = pipeline.get_stream_profile_list(stream_type)
-        profile = profiles.get_video_stream_profile(config.width, config.height, ob.OBFormat.ANY, config.fps)
+        profile = _select_video_profile(profiles, ob.OBFormat, config.width, config.height, config.fps)
         pipeline_config.enable_stream(profile)
 
         def on_frames(frames: Any) -> None:
-            frame = frames.get_frame(stream_type)
+            frame = frames.get_frame_by_type(stream_type)
             if frame is None:
                 return
             video = frame.as_video_frame()
-            data = np.frombuffer(frame.get_data(), dtype=np.uint8)
-            image = data.reshape((video.get_height(), video.get_width(), -1))
+            data = np.frombuffer(frame.get_data(), dtype=np.uint8).copy()
+            height = int(video.get_height())
+            width = int(video.get_width())
+            pixel_format = str(frame.get_format()).upper()
+            if "MJPG" in pixel_format or "MJPEG" in pixel_format:
+                image = data
+            elif data.size == height * width * 3:
+                image = data.reshape((height, width, 3))
+            elif data.size == height * width * 2:
+                image = data.reshape((height, width, 2))
+            else:
+                raise RuntimeError(
+                    f"unexpected Orbbec frame size {data.size} for {width}x{height} {pixel_format}"
+                )
             callback(
                 RawOrbbecFrame(
                     image=image,
-                    pixel_format=str(frame.get_format()).upper(),
+                    pixel_format=pixel_format,
                     device_timestamp_us=int(frame.get_timestamp_us()),
                     system_timestamp_us=int(frame.get_system_timestamp_us()),
                     received_monotonic_ns=time.monotonic_ns(),
