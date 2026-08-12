@@ -9,7 +9,11 @@ from lerobot.cameras.orbbec import (
     OrbbecSdkRuntime,
     RawOrbbecFrame,
 )
-from lerobot.cameras.orbbec.camera_orbbec import _sdk_stream_type, _select_video_profile
+from lerobot.cameras.orbbec.camera_orbbec import (
+    _sdk_sensor_type,
+    _sdk_stream_type,
+    _select_video_profile,
+)
 from lerobot.cameras.utils import make_cameras_from_configs
 
 
@@ -148,6 +152,17 @@ def test_sdk_stream_type_uses_pyorbbecsdk2_member_names():
     assert _sdk_stream_type(StreamType, "color") == 1
     assert _sdk_stream_type(StreamType, "left_color") == 2
     assert _sdk_stream_type(StreamType, "right_color") == 3
+
+
+def test_sdk_sensor_type_uses_pyorbbecsdk2_member_names():
+    class SensorType:
+        COLOR_SENSOR = 1
+        LEFT_COLOR_SENSOR = 2
+        RIGHT_COLOR_SENSOR = 3
+
+    assert _sdk_sensor_type(SensorType, "color") == 1
+    assert _sdk_sensor_type(SensorType, "left_color") == 2
+    assert _sdk_sensor_type(SensorType, "right_color") == 3
 
 
 def test_select_video_profile_tries_supported_color_formats_in_order():
