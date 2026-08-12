@@ -18,7 +18,9 @@ class FakeMeta:
 class FakeDataset:
     def __init__(self): self.meta, self.frames, self.saved, self.cleared, self.finalized = FakeMeta(), [], 0, 0, 0
     def add_frame(self, frame): self.frames.append(frame)
-    def save_episode(self): self.saved += 1; self.meta.total_episodes += 1; self.meta.total_frames += len(self.frames); self.frames = []
+    def save_episode(self, parallel_encoding=True):
+        assert parallel_encoding is False
+        self.saved += 1; self.meta.total_episodes += 1; self.meta.total_frames += len(self.frames); self.frames = []
     def clear_episode_buffer(self, delete_images=True): self.cleared += 1; self.frames = []
     def has_pending_frames(self): return bool(self.frames)
     def finalize(self): self.finalized += 1

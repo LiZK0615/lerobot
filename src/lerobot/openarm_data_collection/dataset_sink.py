@@ -150,7 +150,7 @@ class DatasetSink:
         final = diag_dir / f"episode_{episode:06d}.parquet"
         pq.write_table(pa.Table.from_pylist(self._diagnostics), temporary)
         _atomic_json(self.root / ".openarm_recording/commit.json", {"episode_index": episode, "state": "PREPARED"})
-        self.dataset.save_episode()
+        self.dataset.save_episode(parallel_encoding=False)
         _atomic_json(self.root / ".openarm_recording/commit.json", {"episode_index": episode, "state": "DATASET_SAVED"})
         os.replace(temporary, final)
         self._reset()
