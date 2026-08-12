@@ -1,4 +1,5 @@
 from pathlib import Path
+import tomllib
 
 from lerobot.openarm_data_collection.config import OpenArmRecordConfig
 
@@ -36,6 +37,52 @@ def test_cli_passes_camera_display_to_core_config():
 
     cfg = OpenArmRecordCliConfig("/tmp/data", "task", "任务", "rig.yaml", display_cameras=True)
     assert cfg.core().display_cameras is True
+
+
+def test_arm64_uses_gui_opencv_and_other_platforms_use_headless():
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    dependencies = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
+
+    assert 'opencv-python>=4.9.0,<4.14.0; sys_platform == "linux" and (platform_machine == "aarch64" or platform_machine == "arm64")' in dependencies
+    assert 'opencv-python-headless>=4.9.0,<4.14.0; sys_platform != "linux" or (platform_machine != "aarch64" and platform_machine != "arm64")' in dependencies
+
+
+def test_camera_timestamp_prefers_sdk_system_timestamp():
+    from lerobot.cameras.orbbec import OrbbecFrame
+    from lerobot.scripts.lerobot_openarm_record import map_camera_timestamp
+
+    packet = OrbbecFrame(None, "serial", "color", 123, 1_700_000_002_000_000, 2_012_000_000, None, 0)
+
+    class Mapper:
+        def update(self, timestamp, received):
+            assert timestamp == 1_700_000_002_000_000
+            assert received == 2_012_000_000
+            return 2_000_000_000
+
+    class DeviceMapper:
+        def update(self, timestamp, received):
+            raise AssertionError("device mapper must not be used when system timestamp exists")
+
+    assert map_camera_timestamp(packet, Mapper(), DeviceMapper()) == (2_000_000_000, "system")
+
+
+def test_camera_timestamp_falls_back_to_device_timestamp():
+    from lerobot.cameras.orbbec import OrbbecFrame
+    from lerobot.scripts.lerobot_openarm_record import map_camera_timestamp
+
+    packet = OrbbecFrame(None, "serial", "color", 123, None, 2_012_000_000, None, 0)
+
+    class SystemMapper:
+        def update(self, timestamp, received):
+            raise AssertionError("system mapper must not be used without system timestamp")
+
+    class DeviceMapper:
+        def update(self, timestamp, received):
+            assert timestamp == 123
+            assert received == 2_012_000_000
+            return 2_000_000_000
+
+    assert map_camera_timestamp(packet, SystemMapper(), DeviceMapper()) == (2_000_000_000, "device_fallback")
 
 
 def test_feedback_reports_lifecycle_progress_and_failures(capsys):

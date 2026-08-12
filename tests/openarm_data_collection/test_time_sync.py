@@ -4,7 +4,12 @@ import numpy as np
 import pytest
 
 from lerobot.cameras.orbbec import OrbbecFrame
-from lerobot.openarm_data_collection.time_sync import ClockMappingError, DeviceClockMapper, SampleSynchronizer
+from lerobot.openarm_data_collection.time_sync import (
+    ClockMappingError,
+    DeviceClockMapper,
+    SampleSynchronizer,
+    SystemClockMapper,
+)
 from lerobot.openarm_data_collection.types import RecordingSnapshot, TimedVector
 
 
@@ -33,6 +38,35 @@ def test_mapper_tracks_offset_and_drift_monotonically():
     assert mapped == sorted(mapped)
     with pytest.raises(ClockMappingError, match="strictly increasing"):
         mapper.update(19 * 33_333, 3_000_000_000)
+
+
+def test_system_clock_mapper_converts_epoch_timestamp_to_monotonic_time():
+    mapper = SystemClockMapper(realtime_minus_monotonic_ns=1_700_000_000_000_000_000)
+
+    mapped = mapper.update(
+        system_timestamp_us=1_700_000_002_000_000,
+        received_monotonic_ns=2_012_000_000,
+    )
+
+    assert mapped == 2_000_000_000
+
+
+def test_system_clock_mapper_rejects_non_increasing_timestamp():
+    mapper = SystemClockMapper(realtime_minus_monotonic_ns=1_700_000_000_000_000_000)
+    mapper.update(1_700_000_002_000_000, 2_010_000_000)
+
+    with pytest.raises(ClockMappingError, match="system timestamp is not strictly increasing"):
+        mapper.update(1_700_000_002_000_000, 2_020_000_000)
+
+
+def test_system_clock_mapper_rejects_implausible_capture_latency():
+    mapper = SystemClockMapper(
+        realtime_minus_monotonic_ns=1_700_000_000_000_000_000,
+        max_capture_latency_ns=250_000_000,
+    )
+
+    with pytest.raises(ClockMappingError, match="system clock mapping is inconsistent"):
+        mapper.update(1_700_000_002_000_000, 2_500_000_001)
 
 
 def test_accepts_complete_set_and_never_reuses_camera_frames():

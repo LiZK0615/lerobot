@@ -14,7 +14,7 @@ from lerobot.openarm_data_collection.preview import CameraPreview
 from lerobot.openarm_data_collection.ros_receiver import RosSnapshotReceiver
 from lerobot.openarm_data_collection.session import RecordingSession, SessionState
 from lerobot.openarm_data_collection.terminal import TerminalKeys
-from lerobot.openarm_data_collection.time_sync import DeviceClockMapper, SampleSynchronizer
+from lerobot.openarm_data_collection.time_sync import DeviceClockMapper, SampleSynchronizer, SystemClockMapper
 
 
 @dataclass
@@ -116,6 +116,14 @@ class RecorderFeedback:
         self._last_state = status.state
 
 
+def map_camera_timestamp(
+    packet, system_mapper: SystemClockMapper, device_mapper: DeviceClockMapper
+) -> tuple[int, str]:
+    if packet.system_timestamp_us is not None:
+        return system_mapper.update(packet.system_timestamp_us, packet.received_monotonic_ns), "system"
+    return device_mapper.update(packet.device_timestamp_us, packet.received_monotonic_ns), "device_fallback"
+
+
 def run(cfg: OpenArmRecordCliConfig) -> None:
     cfg = cfg.core()
     validate_storage(cfg.dataset_root, cfg.min_free_space_gb, cfg.expected_mount)
@@ -123,7 +131,11 @@ def run(cfg: OpenArmRecordCliConfig) -> None:
     receiver = RosSnapshotReceiver(port=cfg.ros_udp_port)
     runtime = OrbbecSdkRuntime()
     cameras = {name: OrbbecCamera(config, runtime) for name, config in camera_configs.items()}
-    mappers = {name: DeviceClockMapper() for name in cameras}
+    system_clock_offset_ns = time.time_ns() - time.monotonic_ns()
+    system_mappers = {
+        name: SystemClockMapper(realtime_minus_monotonic_ns=system_clock_offset_ns) for name in cameras
+    }
+    device_mappers = {name: DeviceClockMapper() for name in cameras}
     synchronizer = SampleSynchronizer()
     repo_id = f"local/{cfg.dataset_name}"
     sink = DatasetSink(
@@ -154,10 +166,13 @@ def run(cfg: OpenArmRecordCliConfig) -> None:
                     last_camera_sequence[name] = packet.sequence
                     latest_images[name] = packet.image
                     try:
-                        mapped = mappers[name].update(packet.device_timestamp_us, packet.received_monotonic_ns)
+                        mapped, _time_source = map_camera_timestamp(
+                            packet, system_mappers[name], device_mappers[name]
+                        )
                         synchronizer.push_camera(name, replace(packet, mapped_monotonic_ns=mapped))
                     except ValueError as error:
-                        session.mark_invalid(f"{name} timestamp mapping failed: {error}")
+                        source = "system" if packet.system_timestamp_us is not None else "device_fallback"
+                        session.mark_invalid(f"{name} {source} timestamp mapping failed: {error}")
                 terminal_key = keys.poll()
                 window_key = preview.poll(latest_images, feedback.status_text(session, now_ns))
                 if preview.failure:

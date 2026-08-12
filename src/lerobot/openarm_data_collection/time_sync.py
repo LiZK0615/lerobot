@@ -1,6 +1,7 @@
 from collections import deque
 from dataclasses import dataclass, replace
 import statistics
+import time
 
 from lerobot.cameras.orbbec import OrbbecFrame
 
@@ -9,6 +10,42 @@ from .types import RecordingSnapshot, SynchronizedSample, TimedVector
 
 class ClockMappingError(ValueError):
     pass
+
+
+class SystemClockMapper:
+    """Map SDK epoch timestamps onto Python's monotonic clock."""
+
+    def __init__(
+        self,
+        realtime_minus_monotonic_ns: int | None = None,
+        max_capture_latency_ns: int = 250_000_000,
+    ) -> None:
+        self._offset_ns = (
+            realtime_minus_monotonic_ns
+            if realtime_minus_monotonic_ns is not None
+            else time.time_ns() - time.monotonic_ns()
+        )
+        self._max_capture_latency_ns = max_capture_latency_ns
+        self._last_system_ns: int | None = None
+        self._last_mapped_ns: int | None = None
+
+    def update(self, system_timestamp_us: int, received_monotonic_ns: int) -> int:
+        system_ns = system_timestamp_us * 1000
+        if self._last_system_ns is not None and system_ns <= self._last_system_ns:
+            raise ClockMappingError("system timestamp is not strictly increasing")
+        mapped_ns = system_ns - self._offset_ns
+        capture_latency_ns = received_monotonic_ns - mapped_ns
+        if not 0 <= capture_latency_ns <= self._max_capture_latency_ns:
+            raise ClockMappingError(
+                "system clock mapping is inconsistent: "
+                f"capture_latency={capture_latency_ns / 1_000_000:.1f}ms "
+                f"limit=0.0..{self._max_capture_latency_ns / 1_000_000:.1f}ms"
+            )
+        if self._last_mapped_ns is not None and mapped_ns <= self._last_mapped_ns:
+            raise ClockMappingError("mapped timestamp is not strictly increasing")
+        self._last_system_ns = system_ns
+        self._last_mapped_ns = mapped_ns
+        return mapped_ns
 
 
 class DeviceClockMapper:
