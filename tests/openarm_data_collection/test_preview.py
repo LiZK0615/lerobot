@@ -1,6 +1,6 @@
 import numpy as np
 
-from lerobot.openarm_data_collection.preview import CameraPreview, compose_preview
+from lerobot.openarm_data_collection.preview import CameraPreview, compose_preview, configure_qt_font_dir
 
 
 def test_compose_preview_builds_three_labeled_panels():
@@ -37,6 +37,26 @@ def test_preview_accepts_window_keys_and_close_only_disables_preview():
     preview = CameraPreview(True, cv2_module=FakeCv2(visible=0.0))
     assert preview.poll(frames, "READY") is None
     assert not preview.enabled
+
+
+def test_preview_without_key_keeps_window_enabled():
+    frames = {name: np.zeros((10, 10, 3), dtype=np.uint8) for name in ("head", "left_wrist", "right_wrist")}
+    preview = CameraPreview(True, cv2_module=FakeCv2(key=-1, visible=1.0))
+
+    assert preview.poll(frames, "READY") is None
+    assert preview.enabled
+    assert preview.failure is None
+
+
+def test_configure_qt_font_dir_uses_first_existing_candidate(tmp_path):
+    missing = tmp_path / "missing"
+    fonts = tmp_path / "fonts"
+    fonts.mkdir()
+    environ = {}
+
+    configure_qt_font_dir(environ, (missing, fonts))
+
+    assert environ["QT_QPA_FONTDIR"] == str(fonts)
 
 
 def test_preview_gui_failure_disables_preview_and_exposes_failure():

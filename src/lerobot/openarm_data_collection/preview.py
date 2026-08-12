@@ -1,5 +1,7 @@
 """Optional OpenCV preview for the three recording cameras."""
 
+import os
+from pathlib import Path
 from typing import Any
 
 import cv2  # type: ignore
@@ -8,6 +10,20 @@ from numpy.typing import NDArray
 
 
 CAMERA_NAMES = ("head", "left_wrist", "right_wrist")
+QT_FONT_CANDIDATES = (
+    Path("/usr/share/fonts/truetype/dejavu"),
+    Path("/usr/share/fonts/truetype/liberation2"),
+    Path("/usr/share/fonts/truetype/freefont"),
+)
+
+
+def configure_qt_font_dir(environ=os.environ, candidates=QT_FONT_CANDIDATES) -> None:
+    if environ.get("QT_QPA_FONTDIR"):
+        return
+    for candidate in candidates:
+        if candidate.is_dir():
+            environ["QT_QPA_FONTDIR"] = str(candidate)
+            return
 
 
 def compose_preview(
@@ -38,6 +54,8 @@ class CameraPreview:
     WINDOW_NAME = "OpenArm Data Collection"
 
     def __init__(self, enabled: bool, cv2_module: Any = cv2) -> None:
+        if enabled:
+            configure_qt_font_dir()
         self.enabled = enabled
         self.failure: str | None = None
         self._cv2 = cv2_module
@@ -54,7 +72,9 @@ class CameraPreview:
             if self._cv2.getWindowProperty(self.WINDOW_NAME, self._cv2.WND_PROP_VISIBLE) < 1:
                 self.close()
                 return None
-            key = chr(key_code & 0xFF).lower() if key_code >= 0 else None
+            if key_code < 0:
+                return None
+            key = chr(key_code & 0xFF).lower()
             return key if key in "rsdq" else None
         except Exception as error:
             self.failure = str(error)
