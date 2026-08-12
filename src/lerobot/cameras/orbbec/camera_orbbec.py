@@ -35,6 +35,15 @@ def _sdk_sensor_type(sensor_type_enum: Any, selected_color_stream: str) -> Any:
     }[selected_color_stream]
 
 
+def _sdk_frame_type(frame_type_enum: Any, selected_color_stream: str) -> Any:
+    """Map stream selection to the frame enum required by FrameSet."""
+    return {
+        "color": frame_type_enum.COLOR_FRAME,
+        "left_color": frame_type_enum.LEFT_COLOR_FRAME,
+        "right_color": frame_type_enum.RIGHT_COLOR_FRAME,
+    }[selected_color_stream]
+
+
 def _select_video_profile(profiles: Any, format_enum: Any, width: int, height: int, fps: int) -> Any:
     """Select the requested profile while preferring formats cheap to convert to RGB."""
     errors: list[str] = []
@@ -109,13 +118,13 @@ class _PyOrbbecAdapter:
         pipeline = ob.Pipeline(device)
         pipeline_config = ob.Config()
         sensor_type = _sdk_sensor_type(ob.OBSensorType, config.selected_color_stream)
-        stream_type = _sdk_stream_type(ob.OBStreamType, config.selected_color_stream)
+        frame_type = _sdk_frame_type(ob.OBFrameType, config.selected_color_stream)
         profiles = pipeline.get_stream_profile_list(sensor_type)
         profile = _select_video_profile(profiles, ob.OBFormat, config.width, config.height, config.fps)
         pipeline_config.enable_stream(profile)
 
         def on_frames(frames: Any) -> None:
-            frame = frames.get_frame_by_type(stream_type)
+            frame = frames.get_frame_by_type(frame_type)
             if frame is None:
                 return
             video = frame.as_video_frame()
