@@ -366,6 +366,7 @@ lerobot-annotate="lerobot.scripts.lerobot_annotate:main"
 lerobot-rollout="lerobot.scripts.lerobot_rollout:main"
 lerobot-openarm-mini-rviz="lerobot.scripts.lerobot_openarm_mini_rviz:main"
 lerobot-openarm-mini-ros2-teleop="lerobot.scripts.lerobot_openarm_mini_ros2_teleop:main"
+lerobot-openarm-record="lerobot.scripts.lerobot_openarm_record:main"
 
 # ---------------- Tool Configurations ----------------
 
