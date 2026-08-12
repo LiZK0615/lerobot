@@ -1,0 +1,15 @@
+cameras:
+  head:
+    serial_number: REPLACE_WITH_GEMINI_336_SERIAL
+    model: gemini_336
+    selected_color_stream: color
+  left_wrist:
+    serial_number: REPLACE_WITH_LEFT_GEMINI_305_SERIAL
+    model: gemini_305
+    preset: Dual Color Streams
+    selected_color_stream: right_color
+  right_wrist:
+    serial_number: REPLACE_WITH_RIGHT_GEMINI_305_SERIAL
+    model: gemini_305
+    preset: Dual Color Streams
+    selected_color_stream: left_color
