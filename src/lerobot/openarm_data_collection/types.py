@@ -23,7 +23,7 @@ class RecordingSnapshot:
     sent_monotonic_ns: int
     state: TimedVector | None
     action: TimedVector | None
-    command: TimedVector | None
+    leader: TimedVector | None
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,7 @@ class SynchronizedSample:
     right_wrist: OrbbecFrame
     state: TimedVector
     action: TimedVector
-    command: TimedVector | None
+    leader: TimedVector | None
     camera_skew_ns: int
     state_age_ns: int
     action_age_ns: int

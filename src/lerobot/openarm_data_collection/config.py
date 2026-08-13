@@ -25,7 +25,6 @@ class OpenArmRecordConfig:
     min_free_space_gb: float = 20.0
     min_episode_sec: float = 1.0
     max_episode_sec: float = 120.0
-    record_command_diagnostics: bool = False
     ros_udp_port: int = 15001
     display_cameras: bool = False
 

@@ -126,7 +126,7 @@ class DatasetSink:
             "camera_skew_ns": sample.camera_skew_ns,
             "state_age_ns": sample.state_age_ns,
             "action_age_ns": sample.action_age_ns,
-            "command_joint_states": list(sample.command.values) if sample.command is not None else None,
+            "leader_joint_states": list(sample.leader.values) if sample.leader is not None else None,
         })
 
     def _reset(self) -> None:

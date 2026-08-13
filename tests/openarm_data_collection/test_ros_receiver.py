@@ -8,8 +8,8 @@ from lerobot.openarm_data_collection.ros_receiver import RosSnapshotReceiver, de
 def payload(sequence=1):
     vector = {"values": [0.0] * 16, "received_monotonic_ns": 90, "ros_stamp_ns": 80}
     return {
-        "version": 1, "sequence": sequence, "sent_monotonic_ns": 100,
-        "state": vector, "action": vector, "command": None
+        "version": 2, "sequence": sequence, "sent_monotonic_ns": 100,
+        "state": vector, "action": vector, "leader": vector
     }
 
 
@@ -39,3 +39,16 @@ def test_receiver_returns_newest_sequence():
     receiver = RosSnapshotReceiver(socket_factory=lambda: sock)
     assert receiver.poll().sequence == 9
     receiver.close()
+
+
+def test_decoder_exposes_leader_diagnostics():
+    snapshot = decode_recording_snapshot(encode(payload()), 4096)
+    assert snapshot.action is not None
+    assert snapshot.leader is not None
+
+
+def test_decoder_rejects_legacy_protocol_to_prevent_action_semantic_mix():
+    value = payload()
+    value["version"] = 1
+    with pytest.raises(ValueError, match="version"):
+        decode_recording_snapshot(encode(value), 4096)

@@ -179,7 +179,7 @@ class SampleSynchronizer:
         return SynchronizedSample(
             sample_monotonic_ns,
             selected["head"], selected["left_wrist"], selected["right_wrist"],
-            snapshot.state, snapshot.action, snapshot.command,
+            snapshot.state, snapshot.action, snapshot.leader,
             max(times) - min(times), state_age, action_age,
         )
 

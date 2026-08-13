@@ -29,8 +29,13 @@ class FakeDataset:
 def sample(at=1_000_000_000):
     image = np.zeros((480, 640, 3), dtype=np.uint8)
     def camera(name): return OrbbecFrame(image, name, "color", 1, 2, at, at, 1)
-    vector = TimedVector((0.0,) * 16, at, None)
-    return SynchronizedSample(at, camera("head"), camera("left"), camera("right"), vector, vector, None, 0, 0, 0)
+    state = TimedVector((0.0,) * 16, at, None)
+    action = TimedVector((1.0,) * 16, at, None)
+    leader = TimedVector((2.0,) * 16, at, None)
+    return SynchronizedSample(
+        at, camera("head"), camera("left"), camera("right"),
+        state, action, leader, 0, 0, 0,
+    )
 
 
 def test_features_match_training_contract():
@@ -48,6 +53,9 @@ def test_save_and_discard_are_transactional(tmp_path):
     assert sink.save_episode() == 0
     assert dataset.saved == 1
     assert (tmp_path / "diagnostics/episode_000000.parquet").is_file()
+    import pyarrow.parquet as pq
+    diagnostics = pq.read_table(tmp_path / "diagnostics/episode_000000.parquet").to_pydict()
+    assert diagnostics["leader_joint_states"][0] == [2.0] * 16
     sink.begin_episode("任务")
     sink.add_sample(sample())
     sink.discard_episode()

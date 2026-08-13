@@ -10,7 +10,6 @@ def test_recording_defaults_match_design():
     assert config.min_free_space_gb == 20.0
     assert config.min_episode_sec == 1.0
     assert config.max_episode_sec == 120.0
-    assert config.record_command_diagnostics is False
     assert config.ros_udp_port == 15001
 
 

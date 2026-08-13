@@ -40,14 +40,14 @@ def decode_recording_snapshot(data: bytes, max_datagram_bytes: int = 4096) -> Re
         payload = json.loads(data.decode())
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("invalid JSON datagram") from error
-    if not isinstance(payload, dict) or payload.get("version") != 1:
+    if not isinstance(payload, dict) or payload.get("version") != 2:
         raise ValueError("unsupported protocol version")
     return RecordingSnapshot(
         _integer(payload.get("sequence"), "sequence"),
         _integer(payload.get("sent_monotonic_ns"), "sent_monotonic_ns"),
         _vector(payload.get("state"), "state"),
         _vector(payload.get("action"), "action"),
-        _vector(payload.get("command"), "command"),
+        _vector(payload.get("leader"), "leader"),
     )
 
 
