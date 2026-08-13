@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -71,3 +72,19 @@ def test_finalize_discards_pending_frames(tmp_path):
     sink.finalize()
     assert dataset.cleared == 1
     assert dataset.finalized == 1
+
+
+def test_resume_uses_the_same_async_image_writer_as_create(tmp_path):
+    (tmp_path / "meta").mkdir()
+    (tmp_path / "meta/info.json").write_text("{}")
+    dataset = FakeDataset()
+
+    with patch(
+        "lerobot.openarm_data_collection.dataset_sink.LeRobotDataset.resume",
+        return_value=dataset,
+    ) as resume:
+        DatasetSink(tmp_path, "local/test", image_writer_threads=4)
+
+    resume.assert_called_once_with(
+        "local/test", root=tmp_path, image_writer_threads=4, video_backend="pyav"
+    )

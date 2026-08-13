@@ -28,6 +28,13 @@ class OpenArmRecordCliConfig:
     min_free_space_gb: float = 20.0
     min_episode_sec: float = 1.0
     max_episode_sec: float = 120.0
+    image_writer_threads: int = 4
+    arming_timeout_sec: float = 3.0
+    arming_stable_sec: float = 1.0
+    min_effective_fps_ratio: float = 0.90
+    fps_check_grace_sec: float = 3.0
+    fps_failure_duration_sec: float = 2.0
+    fps_window_sec: float = 1.0
     ros_udp_port: int = 15001
     display_cameras: bool = False
 
@@ -42,6 +49,13 @@ class OpenArmRecordCliConfig:
             min_free_space_gb=self.min_free_space_gb,
             min_episode_sec=self.min_episode_sec,
             max_episode_sec=self.max_episode_sec,
+            image_writer_threads=self.image_writer_threads,
+            arming_timeout_sec=self.arming_timeout_sec,
+            arming_stable_sec=self.arming_stable_sec,
+            min_effective_fps_ratio=self.min_effective_fps_ratio,
+            fps_check_grace_sec=self.fps_check_grace_sec,
+            fps_failure_duration_sec=self.fps_failure_duration_sec,
+            fps_window_sec=self.fps_window_sec,
             ros_udp_port=self.ros_udp_port,
             display_cameras=self.display_cameras,
         )
@@ -64,7 +78,14 @@ class RecorderFeedback:
         status = session.status(now_ns)
         text = status.state.value
         if status.episode_index is not None:
-            text += f" episode={status.episode_index} elapsed={status.elapsed_sec:.1f}s frames={status.frames} skipped={status.skipped}"
+            if status.state is SessionState.ARMING:
+                text += f" episode={status.episode_index} warmup={status.arming_elapsed_sec:.1f}s"
+            else:
+                text += (
+                    f" episode={status.episode_index} elapsed={status.elapsed_sec:.1f}s "
+                    f"frames={status.frames} sync_skipped={status.sync_skipped} "
+                    f"deadline_missed={status.deadline_missed}"
+                )
         if status.reason:
             text += f" FAILED: {status.reason}"
         return text
@@ -85,7 +106,10 @@ class RecorderFeedback:
         after = session.status(now_ns)
         if key == "r":
             self._failed_reason = None
-            print(f"[RECORDING] episode={after.episode_index} started", flush=True)
+            print(
+                f"[ARMING] episode={after.episode_index} waiting for stable synchronized sources",
+                flush=True,
+            )
             self._last_progress_ns = now_ns
         elif key == "s":
             print(f"[SAVED] episode={before.episode_index} path={self.dataset_path}", flush=True)
@@ -99,15 +123,31 @@ class RecorderFeedback:
 
     def observe(self, session: RecordingSession, now_ns: int) -> None:
         status = session.status(now_ns)
+        if self._last_state is SessionState.ARMING and status.state is SessionState.RECORDING:
+            print(f"[RECORDING] episode={status.episode_index} started", flush=True)
+            self._last_progress_ns = now_ns
+        elif self._last_state is SessionState.ARMING and status.state is SessionState.READY and status.reason:
+            print(f"[FAILED] arming reason={status.reason}", flush=True)
+            self.ready(session)
         if status.state is SessionState.INVALID and status.reason != self._failed_reason:
             print(f"[FAILED] episode={status.episode_index} {status.reason}; press d to discard", flush=True)
             self._failed_reason = status.reason
+        if status.state is SessionState.ARMING and (
+            self._last_progress_ns is None or now_ns - self._last_progress_ns >= self.progress_interval_ns
+        ):
+            print(
+                f"[ARMING] episode={status.episode_index} warmup={status.arming_elapsed_sec:.1f}s",
+                flush=True,
+            )
+            self._last_progress_ns = now_ns
         if status.state is SessionState.RECORDING and (
             self._last_progress_ns is None or now_ns - self._last_progress_ns >= self.progress_interval_ns
         ):
             print(
                 f"[RECORDING] episode={status.episode_index} elapsed={status.elapsed_sec:.1f}s "
-                f"frames={status.frames} skipped={status.skipped} effective_fps={status.effective_fps:.1f}",
+                f"frames={status.frames} sync_skipped={status.sync_skipped} "
+                f"deadline_missed={status.deadline_missed} "
+                f"effective_fps={status.effective_fps:.1f} window_fps={status.window_fps:.1f}",
                 flush=True,
             )
             self._last_progress_ns = now_ns
@@ -138,11 +178,15 @@ def run(cfg: OpenArmRecordCliConfig) -> None:
     repo_id = f"local/{cfg.dataset_name}"
     sink = DatasetSink(
         cfg.dataset_path, repo_id, fps=cfg.fps,
-        min_episode_sec=cfg.min_episode_sec, max_episode_sec=cfg.max_episode_sec
+        min_episode_sec=cfg.min_episode_sec, max_episode_sec=cfg.max_episode_sec,
+        image_writer_threads=cfg.image_writer_threads,
     )
     session = RecordingSession(
         sink, synchronizer, cfg.task, cfg.fps,
-        cfg.min_episode_sec, cfg.max_episode_sec
+        cfg.min_episode_sec, cfg.max_episode_sec,
+        cfg.arming_timeout_sec, cfg.arming_stable_sec,
+        cfg.min_effective_fps_ratio, cfg.fps_check_grace_sec,
+        cfg.fps_failure_duration_sec, cfg.fps_window_sec,
     )
     feedback = RecorderFeedback(str(cfg.dataset_path))
     preview = CameraPreview(cfg.display_cameras)

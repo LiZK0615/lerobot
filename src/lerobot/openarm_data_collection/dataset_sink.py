@@ -46,13 +46,15 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
 class DatasetSink:
     def __init__(
         self, root: Path, repo_id: str, dataset: Any | None = None, fps: int = 30,
-        min_episode_sec: float = 1.0, max_episode_sec: float = 120.0
+        min_episode_sec: float = 1.0, max_episode_sec: float = 120.0,
+        image_writer_threads: int = 4,
     ) -> None:
         self.root = root
         self.repo_id = repo_id
         self.fps = fps
         self.min_episode_sec = min_episode_sec
         self.max_episode_sec = max_episode_sec
+        self.image_writer_threads = image_writer_threads
         self.root.mkdir(parents=True, exist_ok=True)
         self.dataset = dataset if dataset is not None else self._open_dataset()
         self._task: str | None = None
@@ -62,7 +64,11 @@ class DatasetSink:
     def _open_dataset(self) -> LeRobotDataset:
         info = self.root / "meta/info.json"
         if info.is_file():
-            dataset = LeRobotDataset.resume(self.repo_id, root=self.root)
+            dataset = LeRobotDataset.resume(
+                self.repo_id, root=self.root,
+                image_writer_threads=self.image_writer_threads,
+                video_backend="pyav",
+            )
             expected = build_features()
             differences = []
             if dataset.meta.fps != self.fps:
@@ -88,7 +94,7 @@ class DatasetSink:
         return LeRobotDataset.create(
             self.repo_id, self.fps, build_features(), root=self.root,
             robot_type="openarm_v1_bimanual", use_videos=True,
-            image_writer_threads=4, video_backend="pyav"
+            image_writer_threads=self.image_writer_threads, video_backend="pyav"
         )
 
     @property

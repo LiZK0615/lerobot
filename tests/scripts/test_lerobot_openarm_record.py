@@ -11,6 +11,11 @@ def test_recording_defaults_match_design():
     assert config.min_episode_sec == 1.0
     assert config.max_episode_sec == 120.0
     assert config.ros_udp_port == 15001
+    assert config.image_writer_threads == 4
+    assert config.arming_timeout_sec == 3.0
+    assert config.arming_stable_sec == 1.0
+    assert config.min_effective_fps_ratio == 0.9
+    assert config.fps_window_sec == 1.0
 
 
 def test_console_script_is_registered():
@@ -100,18 +105,25 @@ def test_feedback_reports_lifecycle_progress_and_failures(capsys):
         def select(self, now): return object()
         def health(self, now): return type("Health", (), {"fatal": False, "reason": None})()
 
-    session = RecordingSession(Sink(), Sync(), "任务", min_episode_sec=0.0)
+    session = RecordingSession(
+        Sink(), Sync(), "任务", min_episode_sec=0.0,
+        arming_stable_sec=0.0, fps_window_sec=0.0,
+    )
     feedback = RecorderFeedback("/tmp/data/task", progress_interval_sec=1.0)
     feedback.ready(session)
     feedback.handle_key(session, "r", 1_000_000_000)
+    session.tick(1_000_000_000)
+    feedback.observe(session, 1_000_000_000)
     session.tick(1_033_333_333)
     feedback.observe(session, 2_000_000_000)
     session.mark_invalid("camera skew exceeded: actual=48.0ms limit=35.0ms")
     feedback.observe(session, 2_100_000_000)
     output = capsys.readouterr().out
     assert "[READY]" in output
+    assert "[ARMING]" in output
     assert "[RECORDING] episode=0 started" in output
     assert "elapsed=1.0s" in output and "effective_fps=1.0" in output
+    assert "sync_skipped=0" in output and "deadline_missed=0" in output
     assert "[FAILED] episode=0 camera skew exceeded" in output
 
 
@@ -131,15 +143,22 @@ def test_feedback_reports_same_failure_again_in_a_new_episode(capsys):
         def select(self, now): return object()
         def health(self, now): return type("Health", (), {"fatal": False, "reason": None})()
 
-    session = RecordingSession(Sink(), Sync(), "任务", min_episode_sec=0.0)
+    session = RecordingSession(
+        Sink(), Sync(), "任务", min_episode_sec=0.0,
+        arming_stable_sec=0.0, fps_window_sec=0.0,
+    )
     feedback = RecorderFeedback("/tmp/data/task")
     reason = "camera skew exceeded: actual=48.0ms limit=35.0ms"
 
     feedback.handle_key(session, "r", 1_000_000_000)
+    session.tick(1_000_000_000)
+    feedback.observe(session, 1_000_000_000)
     session.mark_invalid(reason)
     feedback.observe(session, 1_100_000_000)
     feedback.handle_key(session, "d", 1_200_000_000)
     feedback.handle_key(session, "r", 2_000_000_000)
+    session.tick(2_000_000_000)
+    feedback.observe(session, 2_000_000_000)
     session.mark_invalid(reason)
     feedback.observe(session, 2_100_000_000)
 

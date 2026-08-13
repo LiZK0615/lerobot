@@ -4,6 +4,7 @@ from lerobot.openarm_data_collection.session import InvalidTransition, Recording
 
 
 class Sink:
+    total_episodes = 0
     def __init__(self): self.saved = self.discarded = self.frames = 0
     def begin_episode(self, task): return 0
     def add_sample(self, sample): self.frames += 1
@@ -18,10 +19,22 @@ class Sync:
     def health(self, now): return type("Health", (), {"fatal": self.fatal, "reason": "timeout"})()
 
 
-def test_invalid_episode_can_only_be_discarded():
-    sink, sync = Sink(), Sync()
-    session = RecordingSession(sink, sync, "任务", min_episode_sec=0.0)
+def armed_session(sink=None, sync=None, **kwargs):
+    sink, sync = sink or Sink(), sync or Sync()
+    kwargs.setdefault("arming_stable_sec", 0.0)
+    kwargs.setdefault("fps_window_sec", 0.0)
+    kwargs.setdefault("min_episode_sec", 0.0)
+    session = RecordingSession(
+        sink, sync, "任务", **kwargs,
+    )
     session.handle_key("r", 0)
+    session.tick(0)
+    assert session.state is SessionState.RECORDING
+    return session, sink, sync
+
+
+def test_invalid_episode_can_only_be_discarded():
+    session, sink, sync = armed_session()
     session.mark_invalid("camera timeout")
     with pytest.raises(InvalidTransition): session.handle_key("s", 1)
     session.handle_key("d", 1)
@@ -30,9 +43,7 @@ def test_invalid_episode_can_only_be_discarded():
 
 
 def test_sampling_and_save():
-    sink, sync = Sink(), Sync()
-    session = RecordingSession(sink, sync, "任务", min_episode_sec=0.0)
-    session.handle_key("r", 0)
+    session, sink, sync = armed_session()
     session.tick(33_333_333)
     session.handle_key("s", 33_333_333)
     assert sink.frames == 1 and sink.saved == 1
@@ -45,10 +56,70 @@ def test_q_only_from_ready():
 
 
 def test_status_exposes_episode_elapsed_and_effective_fps():
-    session = RecordingSession(Sink(), Sync(), "任务", min_episode_sec=0.0)
-    session.handle_key("r", 1_000_000_000)
+    session, _, _ = armed_session()
+    session.started_ns = 1_000_000_000
+    session.next_sample_ns = 1_033_333_333
     session.tick(1_033_333_333)
     status = session.status(3_000_000_000)
     assert status.episode_index == 0
     assert status.elapsed_sec == 2.0
     assert status.effective_fps == 0.5
+
+
+def test_arming_does_not_create_or_write_episode_until_sources_are_stable():
+    sink, sync = Sink(), Sync()
+    session = RecordingSession(
+        sink, sync, "任务", fps=10, arming_stable_sec=1.0,
+        arming_timeout_sec=3.0, fps_window_sec=1.0,
+    )
+
+    session.handle_key("r", 0)
+    assert session.state is SessionState.ARMING
+    assert sink.frames == 0
+    for index in range(11):
+        session.tick(index * 100_000_000)
+
+    assert session.state is SessionState.RECORDING
+    assert sink.frames == 0
+    assert session.started_ns == 1_000_000_000
+
+
+def test_deadline_misses_are_counted_separately_from_sync_skips():
+    session, _, sync = armed_session(fps=10)
+    session.next_sample_ns = 100_000_000
+    session.tick(350_000_000)
+    assert session.frames == 1
+    assert session.deadline_missed == 2
+    assert session.sync_skipped == 0
+
+    sync.value = None
+    session.tick(400_000_000)
+    assert session.sync_skipped == 1
+
+
+def test_sustained_low_fps_becomes_invalid_and_cannot_be_saved():
+    session, _, _ = armed_session(
+        fps=10, min_effective_fps_ratio=0.9, fps_check_grace_sec=1.0,
+        fps_failure_duration_sec=1.0, fps_window_sec=1.0,
+    )
+    session.next_sample_ns = 100_000_000
+
+    for now_ns in (500_000_000, 1_000_000_000, 1_500_000_000, 2_000_000_000):
+        session.tick(now_ns)
+
+    assert session.state is SessionState.INVALID
+    assert "effective FPS too low" in session.reason
+    with pytest.raises(InvalidTransition):
+        session.handle_key("s", 2_100_000_000)
+
+
+def test_final_save_rejects_low_average_fps():
+    session, _, _ = armed_session(
+        fps=10, min_effective_fps_ratio=0.9, fps_check_grace_sec=100.0,
+    )
+    session.next_sample_ns = 100_000_000
+    session.tick(1_000_000_000)
+
+    with pytest.raises(InvalidTransition, match="effective FPS too low"):
+        session.handle_key("s", 1_100_000_000)
+    assert session.state is SessionState.INVALID
