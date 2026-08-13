@@ -32,6 +32,7 @@ class OpenArmRecordConfig:
     fps_check_grace_sec: float = 3.0
     fps_failure_duration_sec: float = 2.0
     fps_window_sec: float = 1.0
+    sync_wait_grace_ms: float = 12.0
     ros_udp_port: int = 15001
     display_cameras: bool = False
 
@@ -50,6 +51,8 @@ class OpenArmRecordConfig:
             raise ValueError("min_effective_fps_ratio must be in (0, 1]")
         if self.fps_check_grace_sec < 0.0 or self.fps_failure_duration_sec <= 0.0 or self.fps_window_sec <= 0.0:
             raise ValueError("FPS timing parameters must be positive (grace may be zero)")
+        if not 0.0 <= self.sync_wait_grace_ms < 1000.0 / self.fps:
+            raise ValueError("sync_wait_grace_ms must be non-negative and shorter than one frame period")
         if not 1 <= self.ros_udp_port <= 65535:
             raise ValueError("ros_udp_port must be between 1 and 65535")
 

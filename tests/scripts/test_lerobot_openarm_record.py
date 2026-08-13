@@ -1,6 +1,8 @@
 from pathlib import Path
 import tomllib
 
+import pytest
+
 from lerobot.openarm_data_collection.config import OpenArmRecordConfig
 
 
@@ -16,6 +18,7 @@ def test_recording_defaults_match_design():
     assert config.arming_stable_sec == 1.0
     assert config.min_effective_fps_ratio == 0.9
     assert config.fps_window_sec == 1.0
+    assert config.sync_wait_grace_ms == 12.0
 
 
 def test_console_script_is_registered():
@@ -164,3 +167,14 @@ def test_feedback_reports_same_failure_again_in_a_new_episode(capsys):
 
     output = capsys.readouterr().out
     assert output.count("[FAILED] episode=0 camera skew exceeded") == 2
+
+
+def test_camera_rate_tracker_uses_sdk_sequence_delta():
+    from lerobot.scripts.lerobot_openarm_record import CameraRateTracker
+
+    tracker = CameraRateTracker(window_sec=1.0)
+    tracker.update("head", sequence=10, received_monotonic_ns=1_000_000_000)
+    tracker.update("head", sequence=25, received_monotonic_ns=1_500_000_000)
+    tracker.update("head", sequence=40, received_monotonic_ns=2_000_000_000)
+
+    assert tracker.rates(2_000_000_000)["head"] == pytest.approx(30.0)

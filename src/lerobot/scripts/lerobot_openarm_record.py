@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """Interactive passive recorder for OpenArm bimanual LeRobot datasets."""
 
+from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
 import time
@@ -35,6 +36,7 @@ class OpenArmRecordCliConfig:
     fps_check_grace_sec: float = 3.0
     fps_failure_duration_sec: float = 2.0
     fps_window_sec: float = 1.0
+    sync_wait_grace_ms: float = 12.0
     ros_udp_port: int = 15001
     display_cameras: bool = False
 
@@ -56,18 +58,20 @@ class OpenArmRecordCliConfig:
             fps_check_grace_sec=self.fps_check_grace_sec,
             fps_failure_duration_sec=self.fps_failure_duration_sec,
             fps_window_sec=self.fps_window_sec,
+            sync_wait_grace_ms=self.sync_wait_grace_ms,
             ros_udp_port=self.ros_udp_port,
             display_cameras=self.display_cameras,
         )
 
 
 class RecorderFeedback:
-    def __init__(self, dataset_path: str, progress_interval_sec: float = 1.0) -> None:
+    def __init__(self, dataset_path: str, progress_interval_sec: float = 1.0, camera_rates=None) -> None:
         self.dataset_path = dataset_path
         self.progress_interval_ns = round(progress_interval_sec * 1_000_000_000)
         self._last_state: SessionState | None = None
         self._last_progress_ns: int | None = None
         self._failed_reason: str | None = None
+        self.camera_rates = camera_rates
 
     def ready(self, session: RecordingSession) -> None:
         print(f"[READY] next_episode={session.sink.total_episodes} [r] record [q] finalize", flush=True)
@@ -147,7 +151,9 @@ class RecorderFeedback:
                 f"[RECORDING] episode={status.episode_index} elapsed={status.elapsed_sec:.1f}s "
                 f"frames={status.frames} sync_skipped={status.sync_skipped} "
                 f"deadline_missed={status.deadline_missed} "
-                f"effective_fps={status.effective_fps:.1f} window_fps={status.window_fps:.1f}",
+                f"effective_fps={status.effective_fps:.1f} window_fps={status.window_fps:.1f} "
+                f"camera_fps={self.camera_rates.rates(now_ns) if self.camera_rates else {}} "
+                f"sync_failures={status.sync_failures}",
                 flush=True,
             )
             self._last_progress_ns = now_ns
@@ -160,6 +166,32 @@ def map_camera_timestamp(
     if packet.system_timestamp_us is not None:
         return system_mapper.update(packet.system_timestamp_us, packet.received_monotonic_ns), "system"
     return device_mapper.update(packet.device_timestamp_us, packet.received_monotonic_ns), "device_fallback"
+
+
+class CameraRateTracker:
+    def __init__(self, window_sec: float = 1.0) -> None:
+        self.window_ns = round(window_sec * 1_000_000_000)
+        self._samples: dict[str, deque[tuple[int, int]]] = {}
+
+    def update(self, name: str, sequence: int, received_monotonic_ns: int) -> None:
+        samples = self._samples.setdefault(name, deque())
+        samples.append((received_monotonic_ns, sequence))
+        cutoff = received_monotonic_ns - self.window_ns
+        while len(samples) > 2 and samples[1][0] <= cutoff:
+            samples.popleft()
+
+    def rates(self, now_ns: int) -> dict[str, float]:
+        result = {}
+        cutoff = now_ns - self.window_ns
+        for name, samples in self._samples.items():
+            while len(samples) > 2 and samples[1][0] <= cutoff:
+                samples.popleft()
+            if len(samples) < 2 or samples[-1][0] <= samples[0][0]:
+                result[name] = 0.0
+                continue
+            elapsed = (samples[-1][0] - samples[0][0]) / 1_000_000_000
+            result[name] = round((samples[-1][1] - samples[0][1]) / elapsed, 1)
+        return result
 
 
 def run(cfg: OpenArmRecordCliConfig) -> None:
@@ -187,8 +219,10 @@ def run(cfg: OpenArmRecordCliConfig) -> None:
         cfg.arming_timeout_sec, cfg.arming_stable_sec,
         cfg.min_effective_fps_ratio, cfg.fps_check_grace_sec,
         cfg.fps_failure_duration_sec, cfg.fps_window_sec,
+        cfg.sync_wait_grace_ms,
     )
-    feedback = RecorderFeedback(str(cfg.dataset_path))
+    camera_rates = CameraRateTracker(cfg.fps_window_sec)
+    feedback = RecorderFeedback(str(cfg.dataset_path), camera_rates=camera_rates)
     preview = CameraPreview(cfg.display_cameras)
     last_camera_sequence = {name: -1 for name in cameras}
     latest_images = {}
@@ -207,6 +241,7 @@ def run(cfg: OpenArmRecordCliConfig) -> None:
                     if packet is None or packet.sequence == last_camera_sequence[name]: continue
                     last_camera_sequence[name] = packet.sequence
                     latest_images[name] = packet.image
+                    camera_rates.update(name, packet.sequence, packet.received_monotonic_ns)
                     try:
                         mapped, _time_source = map_camera_timestamp(
                             packet, system_mappers[name], device_mappers[name]

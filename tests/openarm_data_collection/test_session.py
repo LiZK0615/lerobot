@@ -16,7 +16,11 @@ class Sink:
 class Sync:
     def __init__(self): self.value = object(); self.fatal = False
     def select(self, now): return self.value
-    def health(self, now): return type("Health", (), {"fatal": self.fatal, "reason": "timeout"})()
+    def health(self, now):
+        return type(
+            "Health", (),
+            {"fatal": self.fatal, "reason": "right_wrist missing", "category": "right_wrist_missing"},
+        )()
 
 
 def armed_session(sink=None, sync=None, **kwargs):
@@ -85,7 +89,7 @@ def test_arming_does_not_create_or_write_episode_until_sources_are_stable():
 
 
 def test_deadline_misses_are_counted_separately_from_sync_skips():
-    session, _, sync = armed_session(fps=10)
+    session, _, sync = armed_session(fps=10, sync_wait_grace_ms=0.0)
     session.next_sample_ns = 100_000_000
     session.tick(350_000_000)
     assert session.frames == 1
@@ -95,6 +99,37 @@ def test_deadline_misses_are_counted_separately_from_sync_skips():
     sync.value = None
     session.tick(400_000_000)
     assert session.sync_skipped == 1
+
+
+def test_sync_wait_grace_accepts_a_frame_that_arrives_after_target():
+    session, sink, sync = armed_session(fps=10, sync_wait_grace_ms=12.0)
+    session.next_sample_ns = 100_000_000
+    sync.value = None
+
+    session.tick(100_000_000)
+    assert session.sync_skipped == 0
+    assert sink.frames == 0
+
+    sync.value = object()
+    session.tick(111_000_000)
+    assert session.sync_skipped == 0
+    assert sink.frames == 1
+
+
+def test_sync_wait_timeout_records_structured_failure_reason():
+    session, sink, sync = armed_session(fps=10, sync_wait_grace_ms=12.0)
+    session.next_sample_ns = 100_000_000
+    sync.value = None
+
+    session.tick(100_000_000)
+    session.tick(111_999_999)
+    assert session.sync_skipped == 0
+    session.tick(112_000_000)
+
+    status = session.status(112_000_000)
+    assert status.sync_skipped == 1
+    assert status.sync_failures == {"right_wrist_missing": 1}
+    assert sink.frames == 0
 
 
 def test_sustained_low_fps_becomes_invalid_and_cannot_be_saved():

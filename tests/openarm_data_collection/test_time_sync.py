@@ -108,3 +108,15 @@ def test_health_becomes_fatal_after_half_second():
     assert sync.select(1_000_000_000) is None
     assert not sync.health(1_499_999_999).fatal
     assert sync.health(1_500_000_000).fatal
+
+
+def test_health_exposes_a_structured_failure_category():
+    sync = SampleSynchronizer()
+    assert sync.select(1_000_000_000) is None
+    health = sync.health(1_000_000_000)
+    assert health.category == "head_missing"
+
+    sync = SampleSynchronizer()
+    push_complete(sync, 1_000_000_000, skew=36_000_000)
+    assert sync.select(1_000_000_000) is None
+    assert sync.health(1_000_000_000).category == "camera_skew"

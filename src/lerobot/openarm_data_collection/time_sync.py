@@ -80,6 +80,7 @@ class DeviceClockMapper:
 class SyncHealth:
     fatal: bool
     reason: str | None
+    category: str | None
     failure_started_ns: int | None
 
 
@@ -104,6 +105,7 @@ class SampleSynchronizer:
         self._last_consumed = {name: -1 for name in self.CAMERA_NAMES}
         self._failure_started_ns: int | None = None
         self._failure_reason: str | None = None
+        self._failure_category: str | None = None
 
     def push_camera(self, name: str, frame: OrbbecFrame) -> None:
         if name not in self._cameras:
@@ -117,10 +119,11 @@ class SampleSynchronizer:
     def _nearest(items, target_ns, timestamp):
         return min(items, key=lambda item: abs(timestamp(item) - target_ns), default=None)
 
-    def _fail(self, now_ns: int, reason: str) -> None:
-        if self._failure_reason != reason:
+    def _fail(self, now_ns: int, reason: str, category: str) -> None:
+        if self._failure_category != category:
             self._failure_started_ns = now_ns
-            self._failure_reason = reason
+            self._failure_category = category
+        self._failure_reason = reason
 
     def select(self, sample_monotonic_ns: int) -> SynchronizedSample | None:
         selected: dict[str, OrbbecFrame] = {}
@@ -131,7 +134,7 @@ class SampleSynchronizer:
             ]
             candidate = self._nearest(candidates, sample_monotonic_ns, lambda item: item.mapped_monotonic_ns)
             if candidate is None:
-                self._fail(sample_monotonic_ns, f"{name} missing")
+                self._fail(sample_monotonic_ns, f"{name} missing", f"{name}_missing")
                 return None
             age_ns = abs(sample_monotonic_ns - candidate.mapped_monotonic_ns)
             if age_ns > self.camera_age_ns:
@@ -139,6 +142,7 @@ class SampleSynchronizer:
                     sample_monotonic_ns,
                     f"{name} stale: age={age_ns / 1_000_000:.1f}ms "
                     f"limit={self.camera_age_ns / 1_000_000:.1f}ms",
+                    f"{name}_stale",
                 )
                 return None
             selected[name] = candidate
@@ -149,12 +153,13 @@ class SampleSynchronizer:
                 sample_monotonic_ns,
                 f"camera skew exceeded: actual={skew_ns / 1_000_000:.1f}ms "
                 f"limit={self.camera_skew_ns / 1_000_000:.1f}ms",
+                "camera_skew",
             )
             return None
         reference_ns = sorted(times)[1]
         snapshot = self._nearest(self._snapshots, reference_ns, lambda item: item.sent_monotonic_ns)
         if snapshot is None or snapshot.state is None or snapshot.action is None:
-            self._fail(sample_monotonic_ns, "state or action missing")
+            self._fail(sample_monotonic_ns, "state or action missing", "state_or_action_missing")
             return None
         state_age = abs(reference_ns - snapshot.state.received_monotonic_ns)
         action_age = abs(reference_ns - snapshot.action.received_monotonic_ns)
@@ -163,6 +168,7 @@ class SampleSynchronizer:
                 sample_monotonic_ns,
                 f"state stale: age={state_age / 1_000_000:.1f}ms "
                 f"limit={self.state_age_ns / 1_000_000:.1f}ms",
+                "state_stale",
             )
             return None
         if action_age > self.action_age_ns:
@@ -170,12 +176,14 @@ class SampleSynchronizer:
                 sample_monotonic_ns,
                 f"action stale: age={action_age / 1_000_000:.1f}ms "
                 f"limit={self.action_age_ns / 1_000_000:.1f}ms",
+                "action_stale",
             )
             return None
         for name, frame in selected.items():
             self._last_consumed[name] = frame.sequence
         self._failure_started_ns = None
         self._failure_reason = None
+        self._failure_category = None
         return SynchronizedSample(
             sample_monotonic_ns,
             selected["head"], selected["left_wrist"], selected["right_wrist"],
@@ -188,5 +196,6 @@ class SampleSynchronizer:
         return SyncHealth(
             fatal=started is not None and now_ns - started >= self.fatal_after_ns,
             reason=self._failure_reason,
+            category=self._failure_category,
             failure_started_ns=started,
         )

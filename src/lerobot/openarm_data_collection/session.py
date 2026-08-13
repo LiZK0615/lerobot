@@ -1,4 +1,5 @@
 from collections import deque
+from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -29,6 +30,7 @@ class SessionStatus:
     effective_fps: float
     window_fps: float
     arming_elapsed_sec: float
+    sync_failures: dict[str, int]
 
 
 class RecordingSession:
@@ -38,6 +40,7 @@ class RecordingSession:
         arming_timeout_sec: float = 3.0, arming_stable_sec: float = 1.0,
         min_effective_fps_ratio: float = 0.90, fps_check_grace_sec: float = 3.0,
         fps_failure_duration_sec: float = 2.0, fps_window_sec: float = 1.0,
+        sync_wait_grace_ms: float = 12.0,
     ) -> None:
         self.sink, self.synchronizer, self.task = sink, synchronizer, task
         self.fps = fps
@@ -50,6 +53,7 @@ class RecordingSession:
         self.fps_check_grace_ns = round(fps_check_grace_sec * 1_000_000_000)
         self.fps_failure_duration_ns = round(fps_failure_duration_sec * 1_000_000_000)
         self.fps_window_ns = round(fps_window_sec * 1_000_000_000)
+        self.sync_wait_grace_ns = round(sync_wait_grace_ms * 1_000_000)
         self.state = SessionState.READY
         self.started_ns: int | None = None
         self.next_sample_ns: int | None = None
@@ -60,6 +64,9 @@ class RecordingSession:
         self.episode_index: int | None = None
         self._recent_frames: deque[int] = deque()
         self._low_fps_started_ns: int | None = None
+        self._pending_sample_target_ns: int | None = None
+        self._pending_sample_deadline_ns: int | None = None
+        self._sync_failures: Counter[str] = Counter()
 
     def mark_invalid(self, reason: str) -> None:
         if self.state is SessionState.RECORDING:
@@ -69,6 +76,9 @@ class RecordingSession:
         self.frames = self.sync_skipped = self.deadline_missed = 0
         self._recent_frames.clear()
         self._low_fps_started_ns = None
+        self._pending_sample_target_ns = None
+        self._pending_sample_deadline_ns = None
+        self._sync_failures.clear()
 
     def _start_recording(self, now_ns: int) -> None:
         self.episode_index = self.sink.begin_episode(self.task)
@@ -164,22 +174,34 @@ class RecordingSession:
             self.reason = f"arming timeout: {health.reason or 'sources did not remain stable'}"
 
     def _tick_recording(self, now_ns: int) -> None:
-        if now_ns < self.next_sample_ns:
+        if self._pending_sample_target_ns is None and now_ns < self.next_sample_ns:
             return
         if now_ns - self.started_ns > self.max_episode_ns:
             self.mark_invalid("maximum episode duration reached")
             return
-        due_count = (now_ns - self.next_sample_ns) // self.period_ns + 1
-        self.deadline_missed += max(0, due_count - 1)
-        target = self.next_sample_ns + (due_count - 1) * self.period_ns
-        self.next_sample_ns += due_count * self.period_ns
+        if self._pending_sample_target_ns is None:
+            due_count = (now_ns - self.next_sample_ns) // self.period_ns + 1
+            self.deadline_missed += max(0, due_count - 1)
+            target = self.next_sample_ns + (due_count - 1) * self.period_ns
+            self.next_sample_ns += due_count * self.period_ns
+            self._pending_sample_target_ns = target
+            self._pending_sample_deadline_ns = now_ns + self.sync_wait_grace_ns
+        else:
+            target = self._pending_sample_target_ns
         sample = self.synchronizer.select(target)
         if sample is None:
-            self.sync_skipped += 1
             health = self.synchronizer.health(now_ns)
+            if now_ns < self._pending_sample_deadline_ns:
+                return
+            self.sync_skipped += 1
+            self._sync_failures[health.category or "unknown"] += 1
+            self._pending_sample_target_ns = None
+            self._pending_sample_deadline_ns = None
             if health.fatal:
                 self.mark_invalid(health.reason or "data source timeout")
             return
+        self._pending_sample_target_ns = None
+        self._pending_sample_deadline_ns = None
         self.sink.add_sample(sample)
         self.frames += 1
         self._recent_frames.append(now_ns)
@@ -214,5 +236,5 @@ class RecordingSession:
         return SessionStatus(
             self.state, self.episode_index, self.frames, self.sync_skipped,
             self.deadline_missed, self.reason, elapsed_sec, effective_fps,
-            window_fps, arming_elapsed_sec,
+            window_fps, arming_elapsed_sec, dict(self._sync_failures),
         )
