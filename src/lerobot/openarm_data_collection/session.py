@@ -1,7 +1,7 @@
-from collections import deque
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass
 from enum import Enum
+import math
 from typing import Any
 
 
@@ -30,6 +30,8 @@ class SessionStatus:
     effective_fps: float
     window_fps: float
     arming_elapsed_sec: float
+    arming_successful: int
+    arming_required: int
     sync_failures: dict[str, int]
 
 
@@ -50,6 +52,7 @@ class RecordingSession:
         self.arming_timeout_ns = round(arming_timeout_sec * 1_000_000_000)
         self.arming_stable_ns = round(arming_stable_sec * 1_000_000_000)
         self.minimum_fps = fps * min_effective_fps_ratio
+        self.arming_required = math.ceil(fps * arming_stable_sec * min_effective_fps_ratio)
         self.fps_check_grace_ns = round(fps_check_grace_sec * 1_000_000_000)
         self.fps_failure_duration_ns = round(fps_failure_duration_sec * 1_000_000_000)
         self.fps_window_ns = round(fps_window_sec * 1_000_000_000)
@@ -58,11 +61,11 @@ class RecordingSession:
         self.started_ns: int | None = None
         self.next_sample_ns: int | None = None
         self.arming_started_ns: int | None = None
-        self.arming_stable_started_ns: int | None = None
         self.frames = self.sync_skipped = self.deadline_missed = 0
         self.reason: str | None = None
         self.episode_index: int | None = None
         self._recent_frames: deque[int] = deque()
+        self._arming_successes: deque[int] = deque()
         self._low_fps_started_ns: int | None = None
         self._pending_sample_target_ns: int | None = None
         self._pending_sample_deadline_ns: int | None = None
@@ -75,6 +78,7 @@ class RecordingSession:
     def _reset_counters(self) -> None:
         self.frames = self.sync_skipped = self.deadline_missed = 0
         self._recent_frames.clear()
+        self._arming_successes.clear()
         self._low_fps_started_ns = None
         self._pending_sample_target_ns = None
         self._pending_sample_deadline_ns = None
@@ -116,7 +120,6 @@ class RecordingSession:
                 raise InvalidTransition("r requires READY")
             self.state = SessionState.ARMING
             self.arming_started_ns = now_ns
-            self.arming_stable_started_ns = None
             self.next_sample_ns = now_ns
             self.reason = None
             self.episode_index = self.sink.total_episodes
@@ -152,26 +155,42 @@ class RecordingSession:
             self.state = SessionState.EXITED
 
     def _tick_arming(self, now_ns: int) -> None:
-        if now_ns < self.next_sample_ns:
+        if self._pending_sample_target_ns is None and now_ns < self.next_sample_ns:
             return
-        target = self.next_sample_ns
-        self.next_sample_ns += self.period_ns
+        if self._pending_sample_target_ns is None:
+            due_count = (now_ns - self.next_sample_ns) // self.period_ns + 1
+            target = self.next_sample_ns + (due_count - 1) * self.period_ns
+            self.next_sample_ns += due_count * self.period_ns
+            self._pending_sample_target_ns = target
+            self._pending_sample_deadline_ns = now_ns + self.sync_wait_grace_ns
+        else:
+            target = self._pending_sample_target_ns
         sample = self.synchronizer.select(target)
         if sample is None:
-            self.arming_stable_started_ns = None
-        elif self.arming_stable_started_ns is None:
-            self.arming_stable_started_ns = now_ns
-            if self.arming_stable_ns <= 0:
-                self._start_recording(now_ns)
+            health = self.synchronizer.health(now_ns)
+            if now_ns < self._pending_sample_deadline_ns:
                 return
-        elif now_ns - self.arming_stable_started_ns >= self.arming_stable_ns:
+            self._sync_failures[health.category or "unknown"] += 1
+        else:
+            self._arming_successes.append(now_ns)
+        self._pending_sample_target_ns = None
+        self._pending_sample_deadline_ns = None
+
+        cutoff = now_ns - self.arming_stable_ns
+        while self._arming_successes and self._arming_successes[0] < cutoff:
+            self._arming_successes.popleft()
+        arming_elapsed_ns = now_ns - self.arming_started_ns
+        if arming_elapsed_ns >= self.arming_stable_ns and len(self._arming_successes) >= self.arming_required:
             self._start_recording(now_ns)
             return
         if now_ns - self.arming_started_ns >= self.arming_timeout_ns:
-            health = self.synchronizer.health(now_ns)
             self.state = SessionState.READY
             self.episode_index = None
-            self.reason = f"arming timeout: {health.reason or 'sources did not remain stable'}"
+            self.reason = (
+                "arming timeout: synchronized sources below threshold: "
+                f"successful={len(self._arming_successes)} required={self.arming_required} "
+                f"sync_failures={dict(self._sync_failures)}"
+            )
 
     def _tick_recording(self, now_ns: int) -> None:
         if self._pending_sample_target_ns is None and now_ns < self.next_sample_ns:
@@ -236,5 +255,6 @@ class RecordingSession:
         return SessionStatus(
             self.state, self.episode_index, self.frames, self.sync_skipped,
             self.deadline_missed, self.reason, elapsed_sec, effective_fps,
-            window_fps, arming_elapsed_sec, dict(self._sync_failures),
+            window_fps, arming_elapsed_sec, len(self._arming_successes),
+            self.arming_required, dict(self._sync_failures),
         )

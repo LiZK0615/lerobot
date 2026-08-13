@@ -131,7 +131,11 @@ class RecorderFeedback:
             print(f"[RECORDING] episode={status.episode_index} started", flush=True)
             self._last_progress_ns = now_ns
         elif self._last_state is SessionState.ARMING and status.state is SessionState.READY and status.reason:
-            print(f"[FAILED] arming reason={status.reason}", flush=True)
+            print(
+                f"[FAILED] arming reason={status.reason} "
+                f"camera_fps={self.camera_rates.rates(now_ns) if self.camera_rates else {}}",
+                flush=True,
+            )
             self.ready(session)
         if status.state is SessionState.INVALID and status.reason != self._failed_reason:
             print(f"[FAILED] episode={status.episode_index} {status.reason}; press d to discard", flush=True)
@@ -140,7 +144,10 @@ class RecorderFeedback:
             self._last_progress_ns is None or now_ns - self._last_progress_ns >= self.progress_interval_ns
         ):
             print(
-                f"[ARMING] episode={status.episode_index} warmup={status.arming_elapsed_sec:.1f}s",
+                f"[ARMING] episode={status.episode_index} warmup={status.arming_elapsed_sec:.1f}s "
+                f"synchronized={status.arming_successful}/{status.arming_required} "
+                f"camera_fps={self.camera_rates.rates(now_ns) if self.camera_rates else {}} "
+                f"sync_failures={status.sync_failures}",
                 flush=True,
             )
             self._last_progress_ns = now_ns

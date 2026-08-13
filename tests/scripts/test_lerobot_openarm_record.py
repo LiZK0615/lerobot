@@ -178,3 +178,44 @@ def test_camera_rate_tracker_uses_sdk_sequence_delta():
     tracker.update("head", sequence=40, received_monotonic_ns=2_000_000_000)
 
     assert tracker.rates(2_000_000_000)["head"] == pytest.approx(30.0)
+
+
+def test_feedback_arming_failure_includes_camera_rates(capsys):
+    from lerobot.openarm_data_collection.session import RecordingSession
+    from lerobot.scripts.lerobot_openarm_record import CameraRateTracker, RecorderFeedback
+
+    class Sink:
+        total_episodes = 0
+        def begin_episode(self, task): return 0
+        def add_sample(self, sample): pass
+        def save_episode(self): return 0
+        def discard_episode(self): pass
+        def finalize(self): pass
+
+    class Sync:
+        def select(self, now): return None
+        def health(self, now):
+            return type(
+                "Health", (),
+                {"fatal": False, "reason": "head missing", "category": "head_missing"},
+            )()
+
+    tracker = CameraRateTracker(window_sec=1.0)
+    tracker.update("head", 1, 0)
+    tracker.update("head", 31, 1_000_000_000)
+    session = RecordingSession(
+        Sink(), Sync(), "任务", fps=10, arming_timeout_sec=1.0,
+        arming_stable_sec=1.0, sync_wait_grace_ms=0.0,
+    )
+    feedback = RecorderFeedback("/tmp/data/task", camera_rates=tracker)
+
+    feedback.handle_key(session, "r", 0)
+    for index in range(11):
+        now_ns = index * 100_000_000
+        session.tick(now_ns)
+        feedback.observe(session, now_ns)
+
+    output = capsys.readouterr().out
+    assert "[FAILED] arming" in output
+    assert "successful=0 required=9" in output
+    assert "camera_fps={'head': 30.0}" in output
