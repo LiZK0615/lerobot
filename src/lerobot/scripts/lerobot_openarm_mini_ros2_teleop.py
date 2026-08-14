@@ -50,7 +50,6 @@ class PresetConfig:
     waypoint_pause_sec: float
     target_tolerance_rad: float
     gripper_closed_threshold_deg: float
-    auto_return_near_tolerance_rad: float
     auto_return_idle_duration_sec: float
     auto_return_idle_joint_delta_deg: float
     prepare_sequence: tuple[str, ...]
@@ -93,10 +92,6 @@ def load_preset_config(path: str | Path) -> PresetConfig:
         payload.get("gripper_closed_threshold_deg", -3.0),
         "gripper_closed_threshold_deg",
     )
-    auto_return_near_tolerance_rad = _finite_float(
-        payload.get("auto_return_near_tolerance_rad", 0.30),
-        "auto_return_near_tolerance_rad",
-    )
     auto_return_idle_duration_sec = _finite_float(
         payload.get("auto_return_idle_duration_sec", payload.get("operator_idle_duration_sec", 0.5)),
         "auto_return_idle_duration_sec",
@@ -109,11 +104,10 @@ def load_preset_config(path: str | Path) -> PresetConfig:
         "auto_return_idle_joint_delta_deg",
     )
     if (
-        auto_return_near_tolerance_rad <= 0.0
-        or auto_return_idle_duration_sec <= 0.0
+        auto_return_idle_duration_sec <= 0.0
         or auto_return_idle_joint_delta_deg <= 0.0
     ):
-        raise ValueError("auto-return tolerance, duration, and joint delta must be positive")
+        raise ValueError("auto-return duration and joint delta must be positive")
     if not -65.0 < gripper_closed_threshold_deg <= 0.0:
         raise ValueError("gripper_closed_threshold_deg must be in (-65, 0]")
 
@@ -153,7 +147,6 @@ def load_preset_config(path: str | Path) -> PresetConfig:
         waypoint_pause_sec=pause,
         target_tolerance_rad=target_tolerance_rad,
         gripper_closed_threshold_deg=gripper_closed_threshold_deg,
-        auto_return_near_tolerance_rad=auto_return_near_tolerance_rad,
         auto_return_idle_duration_sec=auto_return_idle_duration_sec,
         auto_return_idle_joint_delta_deg=auto_return_idle_joint_delta_deg,
         prepare_sequence=sequence,

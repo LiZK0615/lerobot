@@ -41,7 +41,6 @@ def test_default_clutch_thresholds_are_loaded_from_preset_yaml():
     config = load_preset_config(DEFAULT_PRESET_CONFIG_PATH)
     assert config.target_tolerance_rad == 0.10
     assert config.gripper_closed_threshold_deg == -3.0
-    assert config.auto_return_near_tolerance_rad == 0.30
     assert config.auto_return_idle_duration_sec == 0.5
     assert config.auto_return_idle_joint_delta_deg == 2.0
 
@@ -76,7 +75,7 @@ def test_closed_grippers_do_not_trigger_until_operator_has_opened_one():
     assert not workflow.operator_engaged
 
 
-def test_closed_and_quiet_near_ready_triggers_automatic_return_after_half_second():
+def test_closed_and_quiet_triggers_automatic_return_after_half_second():
     workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
     ready, now = drive_to_ready(workflow)
     workflow.handle_command(WorkflowCommand.START_RECORDING, ready, now)
@@ -95,7 +94,7 @@ def test_closed_and_quiet_near_ready_triggers_automatic_return_after_half_second
     assert output.goal == closed
 
 
-def test_closed_and_quiet_far_from_ready_does_not_trigger_return():
+def test_closed_and_quiet_far_from_ready_still_triggers_return():
     workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
     ready, now = drive_to_ready(workflow)
     workflow.handle_command(WorkflowCommand.START_RECORDING, ready, now)
@@ -105,10 +104,12 @@ def test_closed_and_quiet_far_from_ready_does_not_trigger_return():
 
     far = dict(ready)
     far["left_joint_1.pos"] += 18.0
-    workflow.tick(far, now + 0.2)
-    workflow.tick(far, now + 1.0)
+    assert workflow.tick(far, now + 0.2).torque is TorqueRequest.UNCHANGED
+    output = workflow.tick(far, now + 1.0)
 
-    assert workflow.state is WorkflowState.RECORDING_MANUAL
+    assert workflow.state is WorkflowState.AUTO_RETURNING
+    assert output.torque is TorqueRequest.ENABLE
+    assert output.goal == far
 
 
 def test_joint_motion_over_two_degrees_restarts_auto_return_quiet_detection():

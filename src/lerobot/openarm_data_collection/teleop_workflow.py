@@ -182,9 +182,6 @@ class CollectionTeleopWorkflow:
             if not self.operator_engaged:
                 self.idle_detector.reset()
                 return WorkflowOutput(self.motion.step(current, now))
-            if not self._near_table_ready(current):
-                self.idle_detector.reset()
-                return WorkflowOutput()
             if self.idle_detector.update(current, now):
                 self.motion.start_direct_ready(current, now)
                 self.state = WorkflowState.AUTO_RETURNING
@@ -203,13 +200,6 @@ class CollectionTeleopWorkflow:
     def _any_gripper_open(self, current: Mapping[str, float]) -> bool:
         threshold = self.config.gripper_closed_threshold_deg
         return any(float(current[name]) < threshold for name in GRIPPER_ACTION_NAMES)
-
-    def _near_table_ready(self, current: Mapping[str, float]) -> bool:
-        return self.motion.within_waypoint(
-            current,
-            "table_ready",
-            self.config.auto_return_near_tolerance_rad,
-        )
 
 
 def _joint_goals(action: Mapping[str, float], side: str) -> dict[str, float]:

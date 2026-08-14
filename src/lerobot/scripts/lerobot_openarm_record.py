@@ -165,7 +165,7 @@ class RecorderFeedback:
             print(f"[RECORDING] episode={status.episode_index} started", flush=True)
             print(
                 "[RECORDING] open either gripper to engage; finish by closing both "
-                "near table_ready and holding still",
+                "and holding all leader joints still",
                 flush=True,
             )
             self._last_progress_ns = now_ns
@@ -428,7 +428,7 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
                 auto_return_started_ns = now_ns
                 auto_return_completed = False
                 print(
-                    "[AUTO_RETURNING] grippers closed near table_ready; "
+                    "[AUTO_RETURNING] grippers closed and leader joints stable; "
                     "recording continues while both arms return",
                     flush=True,
                 )
