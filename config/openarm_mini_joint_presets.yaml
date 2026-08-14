@@ -1,0 +1,21 @@
+schema_version: 1
+
+# Joint values use the OpenArm follower ROS convention: joints in radians,
+# grippers in metres. The Mini write path applies side flips and J6/J7 remap.
+max_joint_velocity_rad_s: 0.35
+minimum_segment_duration_sec: 3.0
+waypoint_pause_sec: 0.5
+target_tolerance_rad: 0.05
+
+prepare_sequence:
+  - table_clearance
+  - table_ready
+
+waypoints:
+  table_clearance:
+    left:  [0.10, 0.0, 0.0, 0.00, 0.0, 0.0, -0.80, 0.0]
+    right: [-0.10, 0.0, 0.0, 0.00, 0.0, 0.0,  0.80, 0.0]
+
+  table_ready:
+    left:  [0.72, 0.0, 0.0, 1.15, 0.0, 0.0, -1.10, 0.0]
+    right: [-0.72, 0.0, 0.0, 1.15, 0.0, 0.0,  1.10, 0.0]
