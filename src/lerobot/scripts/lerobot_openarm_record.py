@@ -24,6 +24,7 @@ from lerobot.openarm_data_collection.teleop_workflow import (
     run_teleop_worker,
 )
 from lerobot.openarm_data_collection.time_sync import DeviceClockMapper, SampleSynchronizer, SystemClockMapper
+from lerobot.openarm_data_collection.types import JOINT_NAMES as FOLLOWER_JOINT_NAMES
 from lerobot.scripts.lerobot_openarm_mini_ros2_teleop import (
     DEFAULT_PRESET_CONFIG_PATH,
     load_preset_config,
@@ -308,6 +309,31 @@ def follower_matches_waypoint(
     )
 
 
+def follower_waypoint_error(
+    snapshot,
+    waypoint: tuple[float, ...],
+    tolerance_rad: float,
+    now_ns: int,
+    max_state_age_sec: float = 0.5,
+) -> str:
+    if snapshot is None or snapshot.state is None:
+        return "no follower joint-state feedback"
+    age_sec = (now_ns - snapshot.state.received_monotonic_ns) / 1_000_000_000
+    if age_sec > max_state_age_sec:
+        return f"follower joint-state feedback is stale: age={age_sec:.3f}s"
+    index = max(
+        FOLLOWER_ARM_INDICES,
+        key=lambda item: abs(snapshot.state.values[item] - waypoint[item]),
+    )
+    actual = snapshot.state.values[index]
+    target = waypoint[index]
+    return (
+        f"joint={FOLLOWER_JOINT_NAMES[index]} actual={actual:.6f}rad "
+        f"target={target:.6f}rad error={abs(actual - target):.6f}rad "
+        f"tolerance={tolerance_rad:.6f}rad"
+    )
+
+
 def run(cli_cfg: OpenArmRecordCliConfig) -> None:
     if cli_cfg.teleop_startup_timeout_sec <= 0.0:
         raise ValueError("teleop_startup_timeout_sec must be positive")
@@ -411,7 +437,7 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
         if not follower_matches_waypoint(
             latest_snapshot,
             preset_config.waypoints[target_name],
-            preset_config.target_tolerance_rad,
+            preset_config.follower_target_tolerance_rad,
             now_ns,
         ):
             return
@@ -448,7 +474,7 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
                 if not collection_ready and follower_matches_waypoint(
                     latest_snapshot,
                     preset_config.waypoints["table_ready"],
-                    preset_config.target_tolerance_rad,
+                    preset_config.follower_target_tolerance_rad,
                     now_ns,
                 ):
                     collection_ready = True
@@ -466,7 +492,24 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
                     and now_ns - pending_started_ns
                     > round(cli_cfg.follower_motion_timeout_sec * 1_000_000_000)
                 ):
-                    raise TimeoutError(f"{pending_command.value} follower motion timed out")
+                    target_name = (
+                        "table_clearance"
+                        if pending_command is WorkflowCommand.SHUTDOWN
+                        else "table_ready"
+                    )
+                    if not pending_motion_complete:
+                        raise TimeoutError(
+                            f"{pending_command.value} leader motion timed out while moving to {target_name}"
+                        )
+                    detail = follower_waypoint_error(
+                        latest_snapshot,
+                        preset_config.waypoints[target_name],
+                        preset_config.follower_target_tolerance_rad,
+                        now_ns,
+                    )
+                    raise TimeoutError(
+                        f"{pending_command.value} follower motion timed out at {target_name}: {detail}"
+                    )
                 for name, camera in cameras.items():
                     packet = camera.read_latest_packet()
                     if packet is None or packet.sequence == last_camera_sequence[name]: continue
@@ -506,7 +549,7 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
                             request_workflow(WorkflowCommand.RESET_SAVE)
                             print(
                                 f"[RESETTING_SAVE] episode={before.episode_index} recording continues; "
-                                "moving through table_clearance to table_ready",
+                                "moving directly to table_ready",
                                 flush=True,
                             )
                         elif key == "d":

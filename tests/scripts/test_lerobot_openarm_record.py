@@ -205,6 +205,29 @@ def test_follower_waypoint_gate_requires_fresh_actual_joint_feedback():
     assert not follower_matches_waypoint(stale, target, 0.05, now_ns)
 
 
+def test_follower_waypoint_error_reports_largest_joint_error():
+    from lerobot.openarm_data_collection.types import RecordingSnapshot, TimedVector
+    from lerobot.scripts.lerobot_openarm_record import follower_waypoint_error
+
+    now_ns = 2_000_000_000
+    target = tuple(0.0 for _ in range(16))
+    actual = list(target)
+    actual[11] = 0.12
+    snapshot = RecordingSnapshot(
+        1,
+        now_ns,
+        TimedVector(tuple(actual), now_ns, None),
+        None,
+        None,
+    )
+
+    message = follower_waypoint_error(snapshot, target, 0.05, now_ns)
+
+    assert "openarm_right_joint4" in message
+    assert "error=0.120000rad" in message
+    assert "tolerance=0.050000rad" in message
+
+
 def test_feedback_arming_failure_includes_camera_rates(capsys):
     from lerobot.openarm_data_collection.session import RecordingSession
     from lerobot.scripts.lerobot_openarm_record import CameraRateTracker, RecorderFeedback

@@ -137,7 +137,10 @@ class CollectionTeleopWorkflow:
             }
             if self.state not in allowed:
                 raise RuntimeError(f"{command.value} is not allowed from {self.state.value}")
-            self.motion.start_prepare(current, now)
+            if command is WorkflowCommand.RESET_SAVE:
+                self.motion.start_direct_ready(current, now)
+            else:
+                self.motion.start_prepare(current, now)
             self.hold_goal = None
             self.idle_detector.reset()
             self.state = (

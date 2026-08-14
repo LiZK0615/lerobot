@@ -48,7 +48,8 @@ class PresetConfig:
     max_joint_velocity_rad_s: float
     minimum_segment_duration_sec: float
     waypoint_pause_sec: float
-    target_tolerance_rad: float
+    leader_target_tolerance_rad: float
+    follower_target_tolerance_rad: float
     gripper_closed_threshold_deg: float
     operator_idle_duration_sec: float
     operator_idle_joint_delta_deg: float
@@ -68,14 +69,21 @@ def load_preset_config(path: str | Path) -> PresetConfig:
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         raise ValueError("preset config schema_version must be 1")
 
-    positive_fields = (
-        "max_joint_velocity_rad_s",
-        "minimum_segment_duration_sec",
-        "target_tolerance_rad",
-    )
+    positive_fields = ("max_joint_velocity_rad_s", "minimum_segment_duration_sec")
     values = {field: _finite_float(payload.get(field), field) for field in positive_fields}
-    if any(value <= 0.0 for value in values.values()):
-        raise ValueError("preset velocity, duration, and tolerance must be positive")
+    legacy_tolerance = payload.get("target_tolerance_rad")
+    leader_target_tolerance_rad = _finite_float(
+        payload.get("leader_target_tolerance_rad", legacy_tolerance),
+        "leader_target_tolerance_rad",
+    )
+    follower_target_tolerance_rad = _finite_float(
+        payload.get("follower_target_tolerance_rad", legacy_tolerance),
+        "follower_target_tolerance_rad",
+    )
+    if any(value <= 0.0 for value in values.values()) or (
+        leader_target_tolerance_rad <= 0.0 or follower_target_tolerance_rad <= 0.0
+    ):
+        raise ValueError("preset velocity, duration, and tolerances must be positive")
     pause = _finite_float(payload.get("waypoint_pause_sec"), "waypoint_pause_sec")
     if pause < 0.0:
         raise ValueError("waypoint_pause_sec must be non-negative")
@@ -84,7 +92,7 @@ def load_preset_config(path: str | Path) -> PresetConfig:
         "gripper_closed_threshold_deg",
     )
     operator_idle_duration_sec = _finite_float(
-        payload.get("operator_idle_duration_sec", 1.5),
+        payload.get("operator_idle_duration_sec", 1.0),
         "operator_idle_duration_sec",
     )
     operator_idle_joint_delta_deg = _finite_float(
@@ -130,7 +138,8 @@ def load_preset_config(path: str | Path) -> PresetConfig:
         max_joint_velocity_rad_s=values["max_joint_velocity_rad_s"],
         minimum_segment_duration_sec=values["minimum_segment_duration_sec"],
         waypoint_pause_sec=pause,
-        target_tolerance_rad=values["target_tolerance_rad"],
+        leader_target_tolerance_rad=leader_target_tolerance_rad,
+        follower_target_tolerance_rad=follower_target_tolerance_rad,
         gripper_closed_threshold_deg=gripper_closed_threshold_deg,
         operator_idle_duration_sec=operator_idle_duration_sec,
         operator_idle_joint_delta_deg=operator_idle_joint_delta_deg,
@@ -179,7 +188,7 @@ class PresetMotion:
         return ros_positions_to_mapped_action(self.config.waypoints[name])
 
     def _within_tolerance(self, current: Mapping[str, float], target: Mapping[str, float]) -> bool:
-        tolerance_deg = math.degrees(self.config.target_tolerance_rad)
+        tolerance_deg = math.degrees(self.config.leader_target_tolerance_rad)
         return all(
             abs(float(current[name]) - target[name]) <= tolerance_deg
             for name in ACTION_NAMES
@@ -220,6 +229,10 @@ class PresetMotion:
         clearance = self._mapped_waypoint("table_clearance")
         if not self._within_tolerance(current, clearance):
             raise ValueError("table_ready requires the current Mini pose to match table_clearance")
+        self._start_motion(("table_ready",), current, now)
+
+    def start_direct_ready(self, current: Mapping[str, float], now: float) -> None:
+        """Move directly from an arbitrary current pose to table_ready."""
         self._start_motion(("table_ready",), current, now)
 
     def abort(self, current: Mapping[str, float]) -> None:
