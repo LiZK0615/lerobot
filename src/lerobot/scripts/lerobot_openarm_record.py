@@ -119,10 +119,16 @@ class RecorderFeedback:
             text += f" FAILED: {status.reason}"
         return text
 
-    def handle_key(self, session: RecordingSession, key: str, now_ns: int) -> None:
+    def handle_key(
+        self,
+        session: RecordingSession,
+        key: str,
+        now_ns: int,
+        announce_ready: bool = True,
+    ) -> bool:
         before = session.status(now_ns)
         try:
-            if key == "s" and before.state is SessionState.RECORDING:
+            if key == "s" and before.state is SessionState.AWAITING_DECISION:
                 print(
                     f"[SAVING] episode={before.episode_index} frames={before.frames} "
                     f"duration={before.elapsed_sec:.1f}s encoding videos",
@@ -131,7 +137,7 @@ class RecorderFeedback:
             session.handle_key(key, now_ns)
         except Exception as error:
             print(f"[FAILED] key={key} state={before.state.value} reason={error}", flush=True)
-            return
+            return False
         after = session.status(now_ns)
         if key == "r":
             self._failed_reason = None
@@ -142,18 +148,26 @@ class RecorderFeedback:
             self._last_progress_ns = now_ns
         elif key == "s":
             print(f"[SAVED] episode={before.episode_index} path={self.dataset_path}", flush=True)
-            self.ready(session)
+            if announce_ready:
+                self.ready(session)
         elif key == "d":
             print(f"[DISCARDED] episode={before.episode_index}", flush=True)
-            self.ready(session)
+            if announce_ready:
+                self.ready(session)
         elif key == "q":
             print(f"[FINALIZED] path={self.dataset_path}", flush=True)
         self._last_state = after.state
+        return True
 
     def observe(self, session: RecordingSession, now_ns: int) -> None:
         status = session.status(now_ns)
         if self._last_state is SessionState.ARMING and status.state is SessionState.RECORDING:
             print(f"[RECORDING] episode={status.episode_index} started", flush=True)
+            print(
+                "[RECORDING] open either gripper to engage; finish by closing both "
+                "near table_ready and holding still",
+                flush=True,
+            )
             self._last_progress_ns = now_ns
         elif self._last_state is SessionState.ARMING and status.state is SessionState.READY and status.reason:
             print(
@@ -386,6 +400,9 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
     pending_request_id: int | None = None
     pending_started_ns: int | None = None
     pending_motion_complete = False
+    auto_return_started_ns: int | None = None
+    auto_return_completed = False
+    decision_gate_reached = False
     latest_snapshot = None
     collection_ready = False
 
@@ -399,26 +416,50 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
         pending_motion_complete = False
 
     def handle_worker_status(status: dict, now_ns: int) -> None:
-        nonlocal worker_state, pending_command, pending_request_id, pending_motion_complete
+        nonlocal worker_state, pending_command, pending_request_id, pending_started_ns
+        nonlocal pending_motion_complete, auto_return_started_ns, auto_return_completed
         previous = worker_state
         worker_state = status["state"]
         if status.get("error"):
             raise RuntimeError(f"teleop worker failed: {status['error']}")
         if worker_state != previous:
             print(f"[TELEOP] state={worker_state}", flush=True)
+            if worker_state == WorkflowState.AUTO_RETURNING.value:
+                auto_return_started_ns = now_ns
+                auto_return_completed = False
+                print(
+                    "[AUTO_RETURNING] grippers closed near table_ready; "
+                    "recording continues while both arms return",
+                    flush=True,
+                )
+            elif worker_state == WorkflowState.AWAITING_DECISION.value:
+                print(
+                    "[WAITING_FOLLOWER] Mini leaders reached table_ready; "
+                    "waiting for both OpenArm followers",
+                    flush=True,
+                )
         if pending_command is None or status["request_id"] != pending_request_id:
             return
         if pending_command is WorkflowCommand.START_RECORDING and worker_state in {
-            WorkflowState.RECORDING_LOCKED.value,
             WorkflowState.RECORDING_MANUAL.value,
         }:
             pending_command = None
             pending_request_id = None
-        elif pending_command in {
-            WorkflowCommand.RESET_SAVE,
-            WorkflowCommand.RESET_DISCARD,
-        } and worker_state == WorkflowState.READY.value:
+            pending_started_ns = None
+        elif (
+            pending_command is WorkflowCommand.RESET_DISCARD
+            and worker_state == WorkflowState.READY.value
+        ):
             pending_motion_complete = True
+        elif (
+            pending_command is WorkflowCommand.FINISH_DECISION
+            and worker_state == WorkflowState.READY.value
+        ):
+            pending_command = None
+            pending_request_id = None
+            pending_started_ns = None
+            auto_return_completed = False
+            feedback.ready(session)
         elif (
             pending_command is WorkflowCommand.SHUTDOWN
             and worker_state == WorkflowState.SHUTDOWN_COMPLETE.value
@@ -437,7 +478,7 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
         if not follower_matches_waypoint(
             latest_snapshot,
             preset_config.waypoints[target_name],
-            preset_config.follower_target_tolerance_rad,
+            preset_config.target_tolerance_rad,
             now_ns,
         ):
             return
@@ -446,9 +487,7 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
         pending_request_id = None
         pending_started_ns = None
         pending_motion_complete = False
-        if completed is WorkflowCommand.RESET_SAVE:
-            feedback.handle_key(session, "s", now_ns)
-        elif completed is WorkflowCommand.RESET_DISCARD:
+        if completed is WorkflowCommand.RESET_DISCARD:
             feedback.ready(session)
         elif completed is WorkflowCommand.SHUTDOWN:
             feedback.handle_key(session, "q", now_ns)
@@ -474,7 +513,7 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
                 if not collection_ready and follower_matches_waypoint(
                     latest_snapshot,
                     preset_config.waypoints["table_ready"],
-                    preset_config.follower_target_tolerance_rad,
+                    preset_config.target_tolerance_rad,
                     now_ns,
                 ):
                     collection_ready = True
@@ -486,6 +525,43 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
                 ):
                     raise TimeoutError("OpenArm followers did not reach table_ready")
                 complete_pending_when_follower_arrives(now_ns)
+                if worker_state in {
+                    WorkflowState.AUTO_RETURNING.value,
+                    WorkflowState.AWAITING_DECISION.value,
+                } and session.state in {
+                    SessionState.RECORDING,
+                    SessionState.INVALID,
+                } and not auto_return_completed:
+                    if auto_return_started_ns is None:
+                        auto_return_started_ns = now_ns
+                    followers_ready = follower_matches_waypoint(
+                        latest_snapshot,
+                        preset_config.waypoints["table_ready"],
+                        preset_config.target_tolerance_rad,
+                        now_ns,
+                    )
+                    if (
+                        worker_state == WorkflowState.AWAITING_DECISION.value
+                        and followers_ready
+                    ):
+                        decision_gate_reached = True
+                        auto_return_started_ns = None
+                    elif now_ns - auto_return_started_ns > round(
+                        cli_cfg.follower_motion_timeout_sec * 1_000_000_000
+                    ):
+                        if worker_state == WorkflowState.AUTO_RETURNING.value:
+                            raise TimeoutError(
+                                "automatic return leader motion timed out at table_ready"
+                            )
+                        detail = follower_waypoint_error(
+                            latest_snapshot,
+                            preset_config.waypoints["table_ready"],
+                            preset_config.target_tolerance_rad,
+                            now_ns,
+                        )
+                        raise TimeoutError(
+                            f"automatic return follower motion timed out at table_ready: {detail}"
+                        )
                 if (
                     pending_command is not None
                     and pending_started_ns is not None
@@ -504,7 +580,7 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
                     detail = follower_waypoint_error(
                         latest_snapshot,
                         preset_config.waypoints[target_name],
-                        preset_config.follower_target_tolerance_rad,
+                        preset_config.target_tolerance_rad,
                         now_ns,
                     )
                     raise TimeoutError(
@@ -544,20 +620,34 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
                                 raise RuntimeError("r requires the teleop workflow to be READY")
                             feedback.handle_key(session, key, now_ns)
                         elif key == "s":
-                            if session.state is not SessionState.RECORDING:
-                                raise RuntimeError("s requires RECORDING")
-                            request_workflow(WorkflowCommand.RESET_SAVE)
-                            print(
-                                f"[RESETTING_SAVE] episode={before.episode_index} recording continues; "
-                                "moving directly to table_ready",
-                                flush=True,
-                            )
+                            if session.state is not SessionState.AWAITING_DECISION:
+                                raise RuntimeError("s requires AWAITING_DECISION")
+                            if worker_state != WorkflowState.AWAITING_DECISION.value:
+                                raise RuntimeError("s requires both leaders and followers at table_ready")
+                            if feedback.handle_key(
+                                session,
+                                key,
+                                now_ns,
+                                announce_ready=False,
+                            ):
+                                request_workflow(WorkflowCommand.FINISH_DECISION)
                         elif key == "d":
-                            session.handle_key("d", now_ns)
-                            print(f"[DISCARDED] episode={before.episode_index}", flush=True)
-                            if worker_state == WorkflowState.READY.value:
-                                feedback.ready(session)
+                            if worker_state == WorkflowState.AWAITING_DECISION.value:
+                                session.handle_key("d", now_ns)
+                                print(f"[DISCARDED] episode={before.episode_index}", flush=True)
+                                request_workflow(WorkflowCommand.FINISH_DECISION)
+                            elif (
+                                session.state is SessionState.ARMING
+                                and worker_state == WorkflowState.READY.value
+                            ):
+                                feedback.handle_key(session, "d", now_ns)
                             else:
+                                if worker_state != WorkflowState.RECORDING_MANUAL.value:
+                                    raise RuntimeError(
+                                        "d requires manual recording or AWAITING_DECISION"
+                                    )
+                                session.handle_key("d", now_ns)
+                                print(f"[DISCARDED] episode={before.episode_index}", flush=True)
                                 request_workflow(WorkflowCommand.RESET_DISCARD)
                                 print(
                                     "[RESETTING_DISCARD] moving through table_clearance to table_ready",
@@ -577,6 +667,22 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
                         )
                 previous_session_state = session.state
                 session.tick(now_ns)
+                if decision_gate_reached:
+                    if session.state is SessionState.RECORDING:
+                        session.pause_for_decision(now_ns)
+                        print(
+                            f"[AWAITING_DECISION] episode={session.episode_index} "
+                            f"frames={session.frames} [s] save [d] discard",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"[AWAITING_DECISION] episode={session.episode_index} "
+                            "is INVALID [d] discard",
+                            flush=True,
+                        )
+                    decision_gate_reached = False
+                    auto_return_completed = True
                 if (
                     previous_session_state is SessionState.ARMING
                     and session.state is SessionState.RECORDING
@@ -585,7 +691,12 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
                 feedback.observe(session, now_ns)
                 time.sleep(0.002)
     except KeyboardInterrupt:
-        if session.state in (SessionState.RECORDING, SessionState.INVALID): sink.discard_episode()
+        if session.state in (
+            SessionState.RECORDING,
+            SessionState.AWAITING_DECISION,
+            SessionState.INVALID,
+        ):
+            sink.discard_episode()
     finally:
         teleop_client.stop()
         try: sink.finalize()

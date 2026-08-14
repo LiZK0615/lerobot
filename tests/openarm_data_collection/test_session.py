@@ -49,8 +49,24 @@ def test_invalid_episode_can_only_be_discarded():
 def test_sampling_and_save():
     session, sink, sync = armed_session()
     session.tick(33_333_333)
+    session.pause_for_decision(33_333_333)
     session.handle_key("s", 33_333_333)
     assert sink.frames == 1 and sink.saved == 1
+
+
+def test_pause_for_decision_stops_sampling_until_save_or_discard():
+    session, sink, sync = armed_session(fps=10)
+    session.next_sample_ns = 100_000_000
+    session.tick(100_000_000)
+    session.pause_for_decision(100_000_000)
+
+    session.tick(1_000_000_000)
+
+    assert session.state is SessionState.AWAITING_DECISION
+    assert sink.frames == 1
+    assert session.status(2_000_000_000).elapsed_sec == 0.1
+    session.handle_key("d", 2_000_000_000)
+    assert sink.discarded == 1
 
 
 def test_q_only_from_ready():
@@ -208,6 +224,7 @@ def test_final_save_rejects_low_average_fps():
     )
     session.next_sample_ns = 100_000_000
     session.tick(1_000_000_000)
+    session.pause_for_decision(1_100_000_000)
 
     with pytest.raises(InvalidTransition, match="effective FPS too low"):
         session.handle_key("s", 1_100_000_000)

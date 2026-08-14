@@ -9,6 +9,7 @@ class SessionState(str, Enum):
     READY = "READY"
     ARMING = "ARMING"
     RECORDING = "RECORDING"
+    AWAITING_DECISION = "AWAITING_DECISION"
     INVALID = "INVALID"
     FINALIZING = "FINALIZING"
     EXITED = "EXITED"
@@ -59,6 +60,7 @@ class RecordingSession:
         self.sync_wait_grace_ns = round(sync_wait_grace_ms * 1_000_000)
         self.state = SessionState.READY
         self.started_ns: int | None = None
+        self.paused_ns: int | None = None
         self.next_sample_ns: int | None = None
         self.arming_started_ns: int | None = None
         self.frames = self.sync_skipped = self.deadline_missed = 0
@@ -72,7 +74,7 @@ class RecordingSession:
         self._sync_failures: Counter[str] = Counter()
 
     def mark_invalid(self, reason: str) -> None:
-        if self.state is SessionState.RECORDING:
+        if self.state in (SessionState.RECORDING, SessionState.AWAITING_DECISION):
             self.state, self.reason = SessionState.INVALID, reason
 
     def _reset_counters(self) -> None:
@@ -88,14 +90,24 @@ class RecordingSession:
         self.episode_index = self.sink.begin_episode(self.task)
         self.state = SessionState.RECORDING
         self.started_ns = now_ns
+        self.paused_ns = None
         self.next_sample_ns = now_ns + self.period_ns
         self.reason = None
         self._reset_counters()
 
     def _average_fps(self, now_ns: int) -> float:
-        if self.started_ns is None or now_ns <= self.started_ns:
+        end_ns = self.paused_ns if self.paused_ns is not None else now_ns
+        if self.started_ns is None or end_ns <= self.started_ns:
             return 0.0
-        return self.frames / ((now_ns - self.started_ns) / 1_000_000_000)
+        return self.frames / ((end_ns - self.started_ns) / 1_000_000_000)
+
+    def pause_for_decision(self, now_ns: int) -> None:
+        if self.state is not SessionState.RECORDING:
+            raise InvalidTransition("pause requires RECORDING")
+        self.state = SessionState.AWAITING_DECISION
+        self.paused_ns = now_ns
+        self._pending_sample_target_ns = None
+        self._pending_sample_deadline_ns = None
 
     def _window_fps(self, now_ns: int) -> float:
         if self.fps_window_ns <= 0:
@@ -125,9 +137,9 @@ class RecordingSession:
             self.episode_index = self.sink.total_episodes
             self._reset_counters()
         elif key == "s":
-            if self.state is not SessionState.RECORDING:
-                raise InvalidTransition("s requires RECORDING")
-            if now_ns - self.started_ns < self.min_episode_ns:
+            if self.state is not SessionState.AWAITING_DECISION:
+                raise InvalidTransition("s requires AWAITING_DECISION")
+            if self.paused_ns - self.started_ns < self.min_episode_ns:
                 raise InvalidTransition("episode is too short")
             average_fps = self._average_fps(now_ns)
             if average_fps < self.minimum_fps:
@@ -141,7 +153,11 @@ class RecordingSession:
             if self.state is SessionState.ARMING:
                 self.state, self.reason = SessionState.READY, None
                 self.episode_index = None
-            elif self.state in (SessionState.RECORDING, SessionState.INVALID):
+            elif self.state in (
+                SessionState.RECORDING,
+                SessionState.AWAITING_DECISION,
+                SessionState.INVALID,
+            ):
                 self.sink.discard_episode()
                 self.state, self.reason = SessionState.READY, None
                 self.episode_index = None
@@ -245,9 +261,14 @@ class RecordingSession:
 
     def status(self, now_ns: int | None = None) -> SessionStatus:
         elapsed_sec = arming_elapsed_sec = 0.0
-        if now_ns is not None and self.state in (SessionState.RECORDING, SessionState.INVALID):
+        if now_ns is not None and self.state in (
+            SessionState.RECORDING,
+            SessionState.AWAITING_DECISION,
+            SessionState.INVALID,
+        ):
             if self.started_ns is not None:
-                elapsed_sec = max(0.0, (now_ns - self.started_ns) / 1_000_000_000)
+                end_ns = self.paused_ns if self.paused_ns is not None else now_ns
+                elapsed_sec = max(0.0, (end_ns - self.started_ns) / 1_000_000_000)
         if now_ns is not None and self.state is SessionState.ARMING and self.arming_started_ns is not None:
             arming_elapsed_sec = max(0.0, (now_ns - self.arming_started_ns) / 1_000_000_000)
         effective_fps = self.frames / elapsed_sec if elapsed_sec > 0.0 else 0.0

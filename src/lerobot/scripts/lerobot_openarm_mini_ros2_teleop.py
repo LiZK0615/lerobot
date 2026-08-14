@@ -48,11 +48,11 @@ class PresetConfig:
     max_joint_velocity_rad_s: float
     minimum_segment_duration_sec: float
     waypoint_pause_sec: float
-    leader_target_tolerance_rad: float
-    follower_target_tolerance_rad: float
+    target_tolerance_rad: float
     gripper_closed_threshold_deg: float
-    operator_idle_duration_sec: float
-    operator_idle_joint_delta_deg: float
+    auto_return_near_tolerance_rad: float
+    auto_return_idle_duration_sec: float
+    auto_return_idle_joint_delta_deg: float
     prepare_sequence: tuple[str, ...]
     waypoints: dict[str, tuple[float, ...]]
 
@@ -71,19 +71,21 @@ def load_preset_config(path: str | Path) -> PresetConfig:
 
     positive_fields = ("max_joint_velocity_rad_s", "minimum_segment_duration_sec")
     values = {field: _finite_float(payload.get(field), field) for field in positive_fields}
-    legacy_tolerance = payload.get("target_tolerance_rad")
-    leader_target_tolerance_rad = _finite_float(
-        payload.get("leader_target_tolerance_rad", legacy_tolerance),
-        "leader_target_tolerance_rad",
+    legacy_leader_tolerance = payload.get("leader_target_tolerance_rad")
+    legacy_follower_tolerance = payload.get("follower_target_tolerance_rad")
+    target_tolerance_rad = _finite_float(
+        payload.get("target_tolerance_rad", legacy_leader_tolerance),
+        "target_tolerance_rad",
     )
-    follower_target_tolerance_rad = _finite_float(
-        payload.get("follower_target_tolerance_rad", legacy_tolerance),
-        "follower_target_tolerance_rad",
-    )
-    if any(value <= 0.0 for value in values.values()) or (
-        leader_target_tolerance_rad <= 0.0 or follower_target_tolerance_rad <= 0.0
+    if legacy_follower_tolerance is not None and not math.isclose(
+        target_tolerance_rad,
+        _finite_float(legacy_follower_tolerance, "follower_target_tolerance_rad"),
     ):
-        raise ValueError("preset velocity, duration, and tolerances must be positive")
+        raise ValueError("leader and follower target tolerances must be identical")
+    if any(value <= 0.0 for value in values.values()) or (
+        target_tolerance_rad <= 0.0
+    ):
+        raise ValueError("preset velocity, duration, and tolerance must be positive")
     pause = _finite_float(payload.get("waypoint_pause_sec"), "waypoint_pause_sec")
     if pause < 0.0:
         raise ValueError("waypoint_pause_sec must be non-negative")
@@ -91,16 +93,27 @@ def load_preset_config(path: str | Path) -> PresetConfig:
         payload.get("gripper_closed_threshold_deg", -3.0),
         "gripper_closed_threshold_deg",
     )
-    operator_idle_duration_sec = _finite_float(
-        payload.get("operator_idle_duration_sec", 1.0),
-        "operator_idle_duration_sec",
+    auto_return_near_tolerance_rad = _finite_float(
+        payload.get("auto_return_near_tolerance_rad", 0.30),
+        "auto_return_near_tolerance_rad",
     )
-    operator_idle_joint_delta_deg = _finite_float(
-        payload.get("operator_idle_joint_delta_deg", 2.0),
-        "operator_idle_joint_delta_deg",
+    auto_return_idle_duration_sec = _finite_float(
+        payload.get("auto_return_idle_duration_sec", payload.get("operator_idle_duration_sec", 0.5)),
+        "auto_return_idle_duration_sec",
     )
-    if operator_idle_duration_sec <= 0.0 or operator_idle_joint_delta_deg <= 0.0:
-        raise ValueError("operator idle duration and joint delta must be positive")
+    auto_return_idle_joint_delta_deg = _finite_float(
+        payload.get(
+            "auto_return_idle_joint_delta_deg",
+            payload.get("operator_idle_joint_delta_deg", 2.0),
+        ),
+        "auto_return_idle_joint_delta_deg",
+    )
+    if (
+        auto_return_near_tolerance_rad <= 0.0
+        or auto_return_idle_duration_sec <= 0.0
+        or auto_return_idle_joint_delta_deg <= 0.0
+    ):
+        raise ValueError("auto-return tolerance, duration, and joint delta must be positive")
     if not -65.0 < gripper_closed_threshold_deg <= 0.0:
         raise ValueError("gripper_closed_threshold_deg must be in (-65, 0]")
 
@@ -138,11 +151,11 @@ def load_preset_config(path: str | Path) -> PresetConfig:
         max_joint_velocity_rad_s=values["max_joint_velocity_rad_s"],
         minimum_segment_duration_sec=values["minimum_segment_duration_sec"],
         waypoint_pause_sec=pause,
-        leader_target_tolerance_rad=leader_target_tolerance_rad,
-        follower_target_tolerance_rad=follower_target_tolerance_rad,
+        target_tolerance_rad=target_tolerance_rad,
         gripper_closed_threshold_deg=gripper_closed_threshold_deg,
-        operator_idle_duration_sec=operator_idle_duration_sec,
-        operator_idle_joint_delta_deg=operator_idle_joint_delta_deg,
+        auto_return_near_tolerance_rad=auto_return_near_tolerance_rad,
+        auto_return_idle_duration_sec=auto_return_idle_duration_sec,
+        auto_return_idle_joint_delta_deg=auto_return_idle_joint_delta_deg,
         prepare_sequence=sequence,
         waypoints=waypoints,
     )
@@ -188,11 +201,25 @@ class PresetMotion:
         return ros_positions_to_mapped_action(self.config.waypoints[name])
 
     def _within_tolerance(self, current: Mapping[str, float], target: Mapping[str, float]) -> bool:
-        tolerance_deg = math.degrees(self.config.leader_target_tolerance_rad)
+        tolerance_deg = math.degrees(self.config.target_tolerance_rad)
         return all(
             abs(float(current[name]) - target[name]) <= tolerance_deg
             for name in ACTION_NAMES
             if "gripper" not in name
+        )
+
+    def within_waypoint(
+        self,
+        current: Mapping[str, float],
+        name: str,
+        tolerance_rad: float,
+    ) -> bool:
+        target = self._mapped_waypoint(name)
+        tolerance_deg = math.degrees(tolerance_rad)
+        return all(
+            abs(float(current[joint]) - target[joint]) <= tolerance_deg
+            for joint in ACTION_NAMES
+            if "gripper" not in joint
         )
 
     def _duration(self, start: Mapping[str, float], target: Mapping[str, float]) -> float:

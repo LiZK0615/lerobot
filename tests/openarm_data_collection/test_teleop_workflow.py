@@ -39,72 +39,111 @@ def drive_to_ready(workflow, now=0.0):
 
 def test_default_clutch_thresholds_are_loaded_from_preset_yaml():
     config = load_preset_config(DEFAULT_PRESET_CONFIG_PATH)
-    assert config.leader_target_tolerance_rad == 0.10
-    assert config.follower_target_tolerance_rad == 0.05
+    assert config.target_tolerance_rad == 0.10
     assert config.gripper_closed_threshold_deg == -3.0
-    assert config.operator_idle_duration_sec == 1.0
-    assert config.operator_idle_joint_delta_deg == 2.0
+    assert config.auto_return_near_tolerance_rad == 0.30
+    assert config.auto_return_idle_duration_sec == 0.5
+    assert config.auto_return_idle_joint_delta_deg == 2.0
 
 
 def test_opening_either_gripper_releases_both_leader_arms():
     workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
     ready, now = drive_to_ready(workflow)
-    workflow.handle_command(WorkflowCommand.START_RECORDING, ready, now)
+    start_output = workflow.handle_command(WorkflowCommand.START_RECORDING, ready, now)
+    assert start_output.torque is TorqueRequest.DISABLE
 
     opened = dict(ready)
     opened["left_gripper.pos"] = -10.0
     output = workflow.tick(opened, now + 0.1)
 
     assert workflow.state is WorkflowState.RECORDING_MANUAL
-    assert output.torque is TorqueRequest.DISABLE
+    assert output.torque is TorqueRequest.UNCHANGED
+    assert workflow.operator_engaged
 
 
-def test_both_closed_and_quiet_for_one_second_locks_at_measured_pose():
+def test_closed_grippers_do_not_trigger_until_operator_has_opened_one():
     workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
     ready, now = drive_to_ready(workflow)
+    workflow.handle_command(WorkflowCommand.START_RECORDING, ready, now)
+
+    workflow.tick(ready, now + 0.1)
+    output = workflow.tick(ready, now + 1.0)
+
+    assert workflow.state is WorkflowState.RECORDING_MANUAL
+    assert output.torque is TorqueRequest.UNCHANGED
+
+
+def test_closed_and_quiet_near_ready_triggers_automatic_return_after_half_second():
+    workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
+    ready, now = drive_to_ready(workflow)
+    workflow.handle_command(WorkflowCommand.START_RECORDING, ready, now)
+
     opened = dict(ready)
     opened["right_gripper.pos"] = -20.0
-    workflow.handle_command(WorkflowCommand.START_RECORDING, opened, now)
-    assert workflow.state is WorkflowState.RECORDING_MANUAL
+    workflow.tick(opened, now + 0.1)
 
     closed = dict(ready)
-    assert workflow.tick(closed, now + 0.1).torque is TorqueRequest.UNCHANGED
-    assert workflow.tick(closed, now + 0.99).torque is TorqueRequest.UNCHANGED
-    output = workflow.tick(closed, now + 1.1)
+    assert workflow.tick(closed, now + 0.2).torque is TorqueRequest.UNCHANGED
+    assert workflow.tick(closed, now + 0.69).torque is TorqueRequest.UNCHANGED
+    output = workflow.tick(closed, now + 0.71)
 
-    assert workflow.state is WorkflowState.RECORDING_LOCKED
+    assert workflow.state is WorkflowState.AUTO_RETURNING
     assert output.torque is TorqueRequest.ENABLE
     assert output.goal == closed
 
 
-def test_joint_motion_over_two_degrees_restarts_quiet_detection():
-    workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
-    ready, now = drive_to_ready(workflow)
-    opened = dict(ready)
-    opened["left_gripper.pos"] = -20.0
-    workflow.handle_command(WorkflowCommand.START_RECORDING, opened, now)
-    closed = dict(ready)
-    workflow.tick(closed, now + 0.1)
-
-    moved = dict(closed)
-    moved["left_joint_1.pos"] += 2.1
-    workflow.tick(moved, now + 1.0)
-    assert workflow.tick(moved, now + 1.6).torque is TorqueRequest.UNCHANGED
-    output = workflow.tick(moved, now + 2.1)
-
-    assert output.torque is TorqueRequest.ENABLE
-    assert workflow.state is WorkflowState.RECORDING_LOCKED
-
-
-def test_save_reset_moves_directly_to_ready():
+def test_closed_and_quiet_far_from_ready_does_not_trigger_return():
     workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
     ready, now = drive_to_ready(workflow)
     workflow.handle_command(WorkflowCommand.START_RECORDING, ready, now)
-    output = workflow.handle_command(WorkflowCommand.RESET_SAVE, ready, now + 0.1)
+    opened = dict(ready)
+    opened["left_gripper.pos"] = -20.0
+    workflow.tick(opened, now + 0.1)
 
-    assert workflow.state is WorkflowState.RESETTING_SAVE
+    far = dict(ready)
+    far["left_joint_1.pos"] += 18.0
+    workflow.tick(far, now + 0.2)
+    workflow.tick(far, now + 1.0)
+
+    assert workflow.state is WorkflowState.RECORDING_MANUAL
+
+
+def test_joint_motion_over_two_degrees_restarts_auto_return_quiet_detection():
+    workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
+    ready, now = drive_to_ready(workflow)
+    workflow.handle_command(WorkflowCommand.START_RECORDING, ready, now)
+    opened = dict(ready)
+    opened["left_gripper.pos"] = -20.0
+    workflow.tick(opened, now + 0.1)
+    workflow.tick(ready, now + 0.2)
+
+    moved = dict(ready)
+    moved["left_joint_1.pos"] += 2.1
+    workflow.tick(moved, now + 0.4)
+    assert workflow.tick(moved, now + 0.61).torque is TorqueRequest.UNCHANGED
+    output = workflow.tick(moved, now + 0.91)
+
     assert output.torque is TorqueRequest.ENABLE
-    assert workflow.motion.waypoint_name == "table_ready"
+    assert workflow.state is WorkflowState.AUTO_RETURNING
+
+
+def test_automatic_return_holds_ready_until_finish_decision():
+    workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
+    ready, now = drive_to_ready(workflow)
+    workflow.handle_command(WorkflowCommand.START_RECORDING, ready, now)
+    opened = dict(ready)
+    opened["left_gripper.pos"] = -20.0
+    workflow.tick(opened, now + 0.1)
+    workflow.tick(ready, now + 0.2)
+    workflow.tick(ready, now + 0.71)
+
+    finish = now + 0.71 + workflow.motion.segment_duration_sec
+    workflow.tick(ready, finish)
+    assert workflow.state is WorkflowState.AWAITING_DECISION
+
+    output = workflow.handle_command(WorkflowCommand.FINISH_DECISION, ready, finish + 0.1)
+    assert workflow.state is WorkflowState.READY
+    assert output.goal == ready
 
 
 def test_discard_reset_still_returns_through_clearance_to_ready():

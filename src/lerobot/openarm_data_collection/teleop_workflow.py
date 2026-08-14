@@ -28,9 +28,9 @@ class WorkflowState(str, Enum):
     CONNECTING = "CONNECTING"
     PREPARING = "PREPARING"
     READY = "READY"
-    RECORDING_LOCKED = "RECORDING_LOCKED"
     RECORDING_MANUAL = "RECORDING_MANUAL"
-    RESETTING_SAVE = "RESETTING_SAVE"
+    AUTO_RETURNING = "AUTO_RETURNING"
+    AWAITING_DECISION = "AWAITING_DECISION"
     RESETTING_DISCARD = "RESETTING_DISCARD"
     SHUTTING_DOWN = "SHUTTING_DOWN"
     SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
@@ -39,8 +39,8 @@ class WorkflowState(str, Enum):
 
 class WorkflowCommand(str, Enum):
     START_RECORDING = "START_RECORDING"
-    RESET_SAVE = "RESET_SAVE"
     RESET_DISCARD = "RESET_DISCARD"
+    FINISH_DECISION = "FINISH_DECISION"
     SHUTDOWN = "SHUTDOWN"
     STOP = "STOP"
 
@@ -98,10 +98,10 @@ class CollectionTeleopWorkflow:
         self.config = preset_config
         self.motion = PresetMotion(preset_config)
         self.state = WorkflowState.CONNECTING
-        self.hold_goal: dict[str, float] | None = None
+        self.operator_engaged = False
         self.idle_detector = JointIdleDetector(
-            preset_config.operator_idle_duration_sec,
-            preset_config.operator_idle_joint_delta_deg,
+            preset_config.auto_return_idle_duration_sec,
+            preset_config.auto_return_idle_joint_delta_deg,
         )
 
     def initialize(self, current: Mapping[str, float], now: float) -> WorkflowOutput:
@@ -121,34 +121,25 @@ class CollectionTeleopWorkflow:
             if self.state is not WorkflowState.READY:
                 raise RuntimeError("START_RECORDING requires READY")
             self.motion.release()
-            self.hold_goal = dict(current)
+            self.operator_engaged = False
             self.idle_detector.reset()
-            if self._any_gripper_open(current):
-                self.state = WorkflowState.RECORDING_MANUAL
-                return WorkflowOutput(torque=TorqueRequest.DISABLE)
-            self.state = WorkflowState.RECORDING_LOCKED
+            self.state = WorkflowState.RECORDING_MANUAL
+            return WorkflowOutput(torque=TorqueRequest.DISABLE)
+
+        if command is WorkflowCommand.RESET_DISCARD:
+            if self.state not in {WorkflowState.READY, WorkflowState.RECORDING_MANUAL}:
+                raise RuntimeError(f"RESET_DISCARD is not allowed from {self.state.value}")
+            self.motion.start_prepare(current, now)
+            self.operator_engaged = False
+            self.idle_detector.reset()
+            self.state = WorkflowState.RESETTING_DISCARD
             return WorkflowOutput(dict(current), TorqueRequest.ENABLE)
 
-        if command in (WorkflowCommand.RESET_SAVE, WorkflowCommand.RESET_DISCARD):
-            allowed = {
-                WorkflowState.READY,
-                WorkflowState.RECORDING_LOCKED,
-                WorkflowState.RECORDING_MANUAL,
-            }
-            if self.state not in allowed:
-                raise RuntimeError(f"{command.value} is not allowed from {self.state.value}")
-            if command is WorkflowCommand.RESET_SAVE:
-                self.motion.start_direct_ready(current, now)
-            else:
-                self.motion.start_prepare(current, now)
-            self.hold_goal = None
-            self.idle_detector.reset()
-            self.state = (
-                WorkflowState.RESETTING_SAVE
-                if command is WorkflowCommand.RESET_SAVE
-                else WorkflowState.RESETTING_DISCARD
-            )
-            return WorkflowOutput(dict(current), TorqueRequest.ENABLE)
+        if command is WorkflowCommand.FINISH_DECISION:
+            if self.state is not WorkflowState.AWAITING_DECISION:
+                raise RuntimeError("FINISH_DECISION requires AWAITING_DECISION")
+            self.state = WorkflowState.READY
+            return WorkflowOutput(self.motion.step(current, now))
 
         if command is WorkflowCommand.SHUTDOWN:
             if self.state is not WorkflowState.READY:
@@ -165,7 +156,6 @@ class CollectionTeleopWorkflow:
     def tick(self, current: Mapping[str, float], now: float) -> WorkflowOutput:
         if self.state in {
             WorkflowState.PREPARING,
-            WorkflowState.RESETTING_SAVE,
             WorkflowState.RESETTING_DISCARD,
             WorkflowState.SHUTTING_DOWN,
         }:
@@ -180,27 +170,39 @@ class CollectionTeleopWorkflow:
         if self.state is WorkflowState.READY:
             return WorkflowOutput(self.motion.step(current, now))
 
-        if self.state is WorkflowState.RECORDING_LOCKED:
-            if self._any_gripper_open(current):
-                self.state = WorkflowState.RECORDING_MANUAL
-                self.hold_goal = None
-                self.idle_detector.reset()
-                return WorkflowOutput(torque=TorqueRequest.DISABLE)
-            return WorkflowOutput(dict(self.hold_goal) if self.hold_goal is not None else None)
-
         if self.state is WorkflowState.RECORDING_MANUAL:
             if self._any_gripper_open(current):
+                self.operator_engaged = True
+                self.idle_detector.reset()
+                return WorkflowOutput()
+            if not self.operator_engaged or not self._near_table_ready(current):
                 self.idle_detector.reset()
                 return WorkflowOutput()
             if self.idle_detector.update(current, now):
-                self.hold_goal = dict(current)
-                self.state = WorkflowState.RECORDING_LOCKED
+                self.motion.start_direct_ready(current, now)
+                self.state = WorkflowState.AUTO_RETURNING
                 return WorkflowOutput(dict(current), TorqueRequest.ENABLE)
+
+        if self.state is WorkflowState.AUTO_RETURNING:
+            goal = self.motion.step(current, now)
+            if self.motion.phase == MotionPhase.HOLDING:
+                self.state = WorkflowState.AWAITING_DECISION
+            return WorkflowOutput(goal)
+
+        if self.state is WorkflowState.AWAITING_DECISION:
+            return WorkflowOutput(self.motion.step(current, now))
         return WorkflowOutput()
 
     def _any_gripper_open(self, current: Mapping[str, float]) -> bool:
         threshold = self.config.gripper_closed_threshold_deg
         return any(float(current[name]) < threshold for name in GRIPPER_ACTION_NAMES)
+
+    def _near_table_ready(self, current: Mapping[str, float]) -> bool:
+        return self.motion.within_waypoint(
+            current,
+            "table_ready",
+            self.config.auto_return_near_tolerance_rad,
+        )
 
 
 def _joint_goals(action: Mapping[str, float], side: str) -> dict[str, float]:

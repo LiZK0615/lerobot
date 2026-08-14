@@ -5,17 +5,16 @@ schema_version: 1
 max_joint_velocity_rad_s: 0.35
 minimum_segment_duration_sec: 3.0
 waypoint_pause_sec: 0.5
-# Mini leaders sag slightly under gravity, so their waypoint gate is looser
-# than the follower feedback gate used before an episode is saved.
-leader_target_tolerance_rad: 0.10
-follower_target_tolerance_rad: 0.05
+# Both Mini leaders and OpenArm followers must satisfy this same final gate.
+target_tolerance_rad: 0.10
 
-# Data-collection clutch: opening either Mini gripper releases both leader arms.
-# With both grippers closed, all 14 leader joints must remain within this
-# peak-to-peak window for the full duration before the leaders hold position.
+# During recording, opening either Mini gripper marks operator engagement.
+# After engagement, both grippers closed near table_ready and a quiet window
+# trigger an automatic direct return to table_ready.
 gripper_closed_threshold_deg: -3.0
-operator_idle_duration_sec: 1.0
-operator_idle_joint_delta_deg: 2.0
+auto_return_near_tolerance_rad: 0.30
+auto_return_idle_duration_sec: 0.5
+auto_return_idle_joint_delta_deg: 2.0
 
 prepare_sequence:
   - table_clearance
