@@ -37,6 +37,9 @@ def test_cli_defaults_to_no_camera_display():
     cfg = OpenArmRecordCliConfig("/tmp/data", "task", "任务", "rig.yaml")
     assert cfg.display_cameras is False
     assert cfg.core().display_cameras is False
+    assert "5B61033187" in cfg.leader_left_port
+    assert "5B61034924" in cfg.leader_right_port
+    assert cfg.teleop_udp_port == 15000
 
 
 def test_cli_passes_camera_display_to_core_config():
@@ -178,6 +181,28 @@ def test_camera_rate_tracker_uses_sdk_sequence_delta():
     tracker.update("head", sequence=40, received_monotonic_ns=2_000_000_000)
 
     assert tracker.rates(2_000_000_000)["head"] == pytest.approx(30.0)
+
+
+def test_follower_waypoint_gate_requires_fresh_actual_joint_feedback():
+    from lerobot.openarm_data_collection.types import RecordingSnapshot, TimedVector
+    from lerobot.scripts.lerobot_openarm_record import follower_matches_waypoint
+
+    now_ns = 2_000_000_000
+    target = tuple(float(index) for index in range(16))
+    state = TimedVector(target, now_ns, None)
+    snapshot = RecordingSnapshot(1, now_ns, state, None, None)
+
+    assert follower_matches_waypoint(snapshot, target, 0.05, now_ns)
+    changed = list(target)
+    changed[4] += 0.1
+    assert not follower_matches_waypoint(
+        RecordingSnapshot(2, now_ns, TimedVector(tuple(changed), now_ns, None), None, None),
+        target,
+        0.05,
+        now_ns,
+    )
+    stale = RecordingSnapshot(3, now_ns, TimedVector(target, 1_000_000_000, None), None, None)
+    assert not follower_matches_waypoint(stale, target, 0.05, now_ns)
 
 
 def test_feedback_arming_failure_includes_camera_rates(capsys):

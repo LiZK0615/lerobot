@@ -49,6 +49,9 @@ class PresetConfig:
     minimum_segment_duration_sec: float
     waypoint_pause_sec: float
     target_tolerance_rad: float
+    gripper_closed_threshold_deg: float
+    operator_idle_duration_sec: float
+    operator_idle_joint_delta_deg: float
     prepare_sequence: tuple[str, ...]
     waypoints: dict[str, tuple[float, ...]]
 
@@ -76,6 +79,22 @@ def load_preset_config(path: str | Path) -> PresetConfig:
     pause = _finite_float(payload.get("waypoint_pause_sec"), "waypoint_pause_sec")
     if pause < 0.0:
         raise ValueError("waypoint_pause_sec must be non-negative")
+    gripper_closed_threshold_deg = _finite_float(
+        payload.get("gripper_closed_threshold_deg", -3.0),
+        "gripper_closed_threshold_deg",
+    )
+    operator_idle_duration_sec = _finite_float(
+        payload.get("operator_idle_duration_sec", 1.5),
+        "operator_idle_duration_sec",
+    )
+    operator_idle_joint_delta_deg = _finite_float(
+        payload.get("operator_idle_joint_delta_deg", 2.0),
+        "operator_idle_joint_delta_deg",
+    )
+    if operator_idle_duration_sec <= 0.0 or operator_idle_joint_delta_deg <= 0.0:
+        raise ValueError("operator idle duration and joint delta must be positive")
+    if not -65.0 < gripper_closed_threshold_deg <= 0.0:
+        raise ValueError("gripper_closed_threshold_deg must be in (-65, 0]")
 
     raw_waypoints = payload.get("waypoints")
     if not isinstance(raw_waypoints, dict) or not raw_waypoints:
@@ -112,6 +131,9 @@ def load_preset_config(path: str | Path) -> PresetConfig:
         minimum_segment_duration_sec=values["minimum_segment_duration_sec"],
         waypoint_pause_sec=pause,
         target_tolerance_rad=values["target_tolerance_rad"],
+        gripper_closed_threshold_deg=gripper_closed_threshold_deg,
+        operator_idle_duration_sec=operator_idle_duration_sec,
+        operator_idle_joint_delta_deg=operator_idle_joint_delta_deg,
         prepare_sequence=sequence,
         waypoints=waypoints,
     )
@@ -158,7 +180,11 @@ class PresetMotion:
 
     def _within_tolerance(self, current: Mapping[str, float], target: Mapping[str, float]) -> bool:
         tolerance_deg = math.degrees(self.config.target_tolerance_rad)
-        return all(abs(float(current[name]) - target[name]) <= tolerance_deg for name in ACTION_NAMES)
+        return all(
+            abs(float(current[name]) - target[name]) <= tolerance_deg
+            for name in ACTION_NAMES
+            if "gripper" not in name
+        )
 
     def _duration(self, start: Mapping[str, float], target: Mapping[str, float]) -> float:
         joint_deltas_rad = [

@@ -3,7 +3,9 @@
 
 from collections import deque
 from dataclasses import dataclass, replace
+import multiprocessing
 from pathlib import Path
+import queue
 import time
 
 import draccus
@@ -15,7 +17,17 @@ from lerobot.openarm_data_collection.preview import CameraPreview
 from lerobot.openarm_data_collection.ros_receiver import RosSnapshotReceiver
 from lerobot.openarm_data_collection.session import RecordingSession, SessionState
 from lerobot.openarm_data_collection.terminal import TerminalKeys
+from lerobot.openarm_data_collection.teleop_workflow import (
+    TeleopWorkerConfig,
+    WorkflowCommand,
+    WorkflowState,
+    run_teleop_worker,
+)
 from lerobot.openarm_data_collection.time_sync import DeviceClockMapper, SampleSynchronizer, SystemClockMapper
+from lerobot.scripts.lerobot_openarm_mini_ros2_teleop import (
+    DEFAULT_PRESET_CONFIG_PATH,
+    load_preset_config,
+)
 
 
 @dataclass
@@ -39,6 +51,14 @@ class OpenArmRecordCliConfig:
     sync_wait_grace_ms: float = 12.0
     ros_udp_port: int = 15001
     display_cameras: bool = False
+    leader_left_port: str = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B61033187-if00"
+    leader_right_port: str = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B61034924-if00"
+    leader_id: str = "openarms_mini"
+    preset_config: str = str(DEFAULT_PRESET_CONFIG_PATH)
+    teleop_udp_host: str = "127.0.0.1"
+    teleop_udp_port: int = 15000
+    teleop_startup_timeout_sec: float = 180.0
+    follower_motion_timeout_sec: float = 30.0
 
     def core(self) -> OpenArmRecordConfig:
         return OpenArmRecordConfig(
@@ -74,7 +94,11 @@ class RecorderFeedback:
         self.camera_rates = camera_rates
 
     def ready(self, session: RecordingSession) -> None:
-        print(f"[READY] next_episode={session.sink.total_episodes} [r] record [q] finalize", flush=True)
+        print(
+            f"[READY] next_episode={session.sink.total_episodes} "
+            "[r] record [q] move_to_clearance_and_finalize",
+            flush=True,
+        )
         self._last_state = session.state
 
     @staticmethod
@@ -201,8 +225,105 @@ class CameraRateTracker:
         return result
 
 
-def run(cfg: OpenArmRecordCliConfig) -> None:
-    cfg = cfg.core()
+class TeleopProcessClient:
+    def __init__(self, config: TeleopWorkerConfig) -> None:
+        context = multiprocessing.get_context("spawn")
+        self.command_queue = context.Queue()
+        self.status_queue = context.Queue()
+        self.process = context.Process(
+            target=run_teleop_worker,
+            args=(config, self.command_queue, self.status_queue),
+            name="openarm-mini-teleop",
+        )
+        self._next_request_id = 1
+        self.latest_status: dict | None = None
+        self._started = False
+
+    def start_and_wait_ready(self, timeout_sec: float) -> dict:
+        self.process.start()
+        self._started = True
+        deadline = time.monotonic() + timeout_sec
+        last_state = None
+        while time.monotonic() < deadline:
+            status = self.poll(timeout=0.2)
+            if status is not None and status["state"] != last_state:
+                print(f"[TELEOP] state={status['state']}", flush=True)
+                last_state = status["state"]
+            if status is not None and status.get("error"):
+                raise RuntimeError(f"teleop worker failed: {status['error']}")
+            if status is not None and status["state"] == WorkflowState.READY.value:
+                return status
+            if not self.process.is_alive():
+                raise RuntimeError("teleop worker exited before reaching table_ready")
+        raise TimeoutError(f"teleop worker did not reach table_ready within {timeout_sec:.1f}s")
+
+    def request(self, command: WorkflowCommand) -> int:
+        request_id = self._next_request_id
+        self._next_request_id += 1
+        self.command_queue.put({"request_id": request_id, "command": command.value})
+        return request_id
+
+    def poll(self, timeout: float = 0.0) -> dict | None:
+        try:
+            status = self.status_queue.get(timeout=timeout) if timeout > 0.0 else self.status_queue.get_nowait()
+        except queue.Empty:
+            return None
+        self.latest_status = status
+        while True:
+            try:
+                self.latest_status = self.status_queue.get_nowait()
+            except queue.Empty:
+                return self.latest_status
+
+    def stop(self, timeout_sec: float = 5.0) -> None:
+        if not self._started:
+            return
+        if not self.process.is_alive():
+            self.process.join(timeout=0.1)
+            return
+        self.request(WorkflowCommand.STOP)
+        self.process.join(timeout=timeout_sec)
+        if self.process.is_alive():
+            self.process.terminate()
+            self.process.join(timeout=timeout_sec)
+
+
+FOLLOWER_ARM_INDICES = tuple(range(7)) + tuple(range(8, 15))
+
+
+def follower_matches_waypoint(
+    snapshot,
+    waypoint: tuple[float, ...],
+    tolerance_rad: float,
+    now_ns: int,
+    max_state_age_sec: float = 0.5,
+) -> bool:
+    if snapshot is None or snapshot.state is None:
+        return False
+    if now_ns - snapshot.state.received_monotonic_ns > round(max_state_age_sec * 1_000_000_000):
+        return False
+    return all(
+        abs(snapshot.state.values[index] - waypoint[index]) <= tolerance_rad
+        for index in FOLLOWER_ARM_INDICES
+    )
+
+
+def run(cli_cfg: OpenArmRecordCliConfig) -> None:
+    if cli_cfg.teleop_startup_timeout_sec <= 0.0:
+        raise ValueError("teleop_startup_timeout_sec must be positive")
+    if cli_cfg.follower_motion_timeout_sec <= 0.0:
+        raise ValueError("follower_motion_timeout_sec must be positive")
+    preset_config = load_preset_config(cli_cfg.preset_config)
+    worker_config = TeleopWorkerConfig(
+        left_port=cli_cfg.leader_left_port,
+        right_port=cli_cfg.leader_right_port,
+        teleop_id=cli_cfg.leader_id,
+        preset_config=cli_cfg.preset_config,
+        host=cli_cfg.teleop_udp_host,
+        udp_port=cli_cfg.teleop_udp_port,
+        fps=float(cli_cfg.fps),
+    )
+    cfg = cli_cfg.core()
     validate_storage(cfg.dataset_root, cfg.min_free_space_gb, cfg.expected_mount)
     camera_configs = load_camera_rig(cfg.camera_config)
     receiver = RosSnapshotReceiver(port=cfg.ros_udp_port)
@@ -231,18 +352,121 @@ def run(cfg: OpenArmRecordCliConfig) -> None:
     camera_rates = CameraRateTracker(cfg.fps_window_sec)
     feedback = RecorderFeedback(str(cfg.dataset_path), camera_rates=camera_rates)
     preview = CameraPreview(cfg.display_cameras)
+    teleop_client = TeleopProcessClient(worker_config)
     last_camera_sequence = {name: -1 for name in cameras}
     latest_images = {}
-    closed = False
+    worker_state = WorkflowState.CONNECTING.value
+    pending_command: WorkflowCommand | None = None
+    pending_request_id: int | None = None
+    pending_started_ns: int | None = None
+    pending_motion_complete = False
+    latest_snapshot = None
+    collection_ready = False
+
+    def request_workflow(command: WorkflowCommand) -> None:
+        nonlocal pending_command, pending_request_id, pending_started_ns, pending_motion_complete
+        if pending_command is not None:
+            raise RuntimeError(f"workflow command {pending_command.value} is still active")
+        pending_command = command
+        pending_request_id = teleop_client.request(command)
+        pending_started_ns = time.monotonic_ns()
+        pending_motion_complete = False
+
+    def handle_worker_status(status: dict, now_ns: int) -> None:
+        nonlocal worker_state, pending_command, pending_request_id, pending_motion_complete
+        previous = worker_state
+        worker_state = status["state"]
+        if status.get("error"):
+            raise RuntimeError(f"teleop worker failed: {status['error']}")
+        if worker_state != previous:
+            print(f"[TELEOP] state={worker_state}", flush=True)
+        if pending_command is None or status["request_id"] != pending_request_id:
+            return
+        if pending_command is WorkflowCommand.START_RECORDING and worker_state in {
+            WorkflowState.RECORDING_LOCKED.value,
+            WorkflowState.RECORDING_MANUAL.value,
+        }:
+            pending_command = None
+            pending_request_id = None
+        elif pending_command in {
+            WorkflowCommand.RESET_SAVE,
+            WorkflowCommand.RESET_DISCARD,
+        } and worker_state == WorkflowState.READY.value:
+            pending_motion_complete = True
+        elif (
+            pending_command is WorkflowCommand.SHUTDOWN
+            and worker_state == WorkflowState.SHUTDOWN_COMPLETE.value
+        ):
+            pending_motion_complete = True
+
+    def complete_pending_when_follower_arrives(now_ns: int) -> None:
+        nonlocal pending_command, pending_request_id, pending_started_ns, pending_motion_complete
+        if pending_command is None or not pending_motion_complete:
+            return
+        target_name = (
+            "table_clearance"
+            if pending_command is WorkflowCommand.SHUTDOWN
+            else "table_ready"
+        )
+        if not follower_matches_waypoint(
+            latest_snapshot,
+            preset_config.waypoints[target_name],
+            preset_config.target_tolerance_rad,
+            now_ns,
+        ):
+            return
+        completed = pending_command
+        pending_command = None
+        pending_request_id = None
+        pending_started_ns = None
+        pending_motion_complete = False
+        if completed is WorkflowCommand.RESET_SAVE:
+            feedback.handle_key(session, "s", now_ns)
+        elif completed is WorkflowCommand.RESET_DISCARD:
+            feedback.ready(session)
+        elif completed is WorkflowCommand.SHUTDOWN:
+            feedback.handle_key(session, "q", now_ns)
 
     try:
+        status = teleop_client.start_and_wait_ready(cli_cfg.teleop_startup_timeout_sec)
+        worker_state = status["state"]
         for camera in cameras.values(): camera.connect()
-        feedback.ready(session)
+        startup_wait_started_ns = time.monotonic_ns()
+        print("[WAITING_FOLLOWER] waiting for both OpenArm followers at table_ready", flush=True)
         with TerminalKeys() as keys:
             while session.state is not SessionState.EXITED:
                 now_ns = time.monotonic_ns()
+                worker_status = teleop_client.poll()
+                if worker_status is not None:
+                    handle_worker_status(worker_status, now_ns)
+                if not teleop_client.process.is_alive() and worker_state != WorkflowState.SHUTDOWN_COMPLETE.value:
+                    raise RuntimeError("teleop worker exited unexpectedly")
                 snapshot = receiver.poll()
-                if snapshot is not None: synchronizer.push_snapshot(snapshot)
+                if snapshot is not None:
+                    latest_snapshot = snapshot
+                    synchronizer.push_snapshot(snapshot)
+                if not collection_ready and follower_matches_waypoint(
+                    latest_snapshot,
+                    preset_config.waypoints["table_ready"],
+                    preset_config.target_tolerance_rad,
+                    now_ns,
+                ):
+                    collection_ready = True
+                    feedback.ready(session)
+                if (
+                    not collection_ready
+                    and now_ns - startup_wait_started_ns
+                    > round(cli_cfg.follower_motion_timeout_sec * 1_000_000_000)
+                ):
+                    raise TimeoutError("OpenArm followers did not reach table_ready")
+                complete_pending_when_follower_arrives(now_ns)
+                if (
+                    pending_command is not None
+                    and pending_started_ns is not None
+                    and now_ns - pending_started_ns
+                    > round(cli_cfg.follower_motion_timeout_sec * 1_000_000_000)
+                ):
+                    raise TimeoutError(f"{pending_command.value} follower motion timed out")
                 for name, camera in cameras.items():
                     packet = camera.read_latest_packet()
                     if packet is None or packet.sequence == last_camera_sequence[name]: continue
@@ -263,13 +487,64 @@ def run(cfg: OpenArmRecordCliConfig) -> None:
                     print(f"[FAILED] camera_preview reason={preview.failure}; preview disabled", flush=True)
                     preview.failure = None
                 key = terminal_key or window_key
-                if key: feedback.handle_key(session, key, now_ns)
+                if key:
+                    before = session.status(now_ns)
+                    try:
+                        if pending_command is not None:
+                            raise RuntimeError(
+                                f"wait for {pending_command.value} to complete before pressing {key}"
+                            )
+                        if key == "r":
+                            if not collection_ready:
+                                raise RuntimeError("r requires both followers at table_ready")
+                            if worker_state != WorkflowState.READY.value:
+                                raise RuntimeError("r requires the teleop workflow to be READY")
+                            feedback.handle_key(session, key, now_ns)
+                        elif key == "s":
+                            if session.state is not SessionState.RECORDING:
+                                raise RuntimeError("s requires RECORDING")
+                            request_workflow(WorkflowCommand.RESET_SAVE)
+                            print(
+                                f"[RESETTING_SAVE] episode={before.episode_index} recording continues; "
+                                "moving through table_clearance to table_ready",
+                                flush=True,
+                            )
+                        elif key == "d":
+                            session.handle_key("d", now_ns)
+                            print(f"[DISCARDED] episode={before.episode_index}", flush=True)
+                            if worker_state == WorkflowState.READY.value:
+                                feedback.ready(session)
+                            else:
+                                request_workflow(WorkflowCommand.RESET_DISCARD)
+                                print(
+                                    "[RESETTING_DISCARD] moving through table_clearance to table_ready",
+                                    flush=True,
+                                )
+                        elif key == "q":
+                            if session.state is not SessionState.READY:
+                                raise RuntimeError("q requires READY; save or discard the active episode first")
+                            if worker_state != WorkflowState.READY.value:
+                                raise RuntimeError("q requires the teleop workflow to be READY")
+                            request_workflow(WorkflowCommand.SHUTDOWN)
+                            print("[SHUTTING_DOWN] moving both arms to table_clearance", flush=True)
+                    except Exception as error:
+                        print(
+                            f"[FAILED] key={key} state={before.state.value} reason={error}",
+                            flush=True,
+                        )
+                previous_session_state = session.state
                 session.tick(now_ns)
+                if (
+                    previous_session_state is SessionState.ARMING
+                    and session.state is SessionState.RECORDING
+                ):
+                    request_workflow(WorkflowCommand.START_RECORDING)
                 feedback.observe(session, now_ns)
                 time.sleep(0.002)
     except KeyboardInterrupt:
         if session.state in (SessionState.RECORDING, SessionState.INVALID): sink.discard_episode()
     finally:
+        teleop_client.stop()
         try: sink.finalize()
         finally:
             preview.close()

@@ -7,6 +7,13 @@ minimum_segment_duration_sec: 3.0
 waypoint_pause_sec: 0.5
 target_tolerance_rad: 0.05
 
+# Data-collection clutch: opening either Mini gripper releases both leader arms.
+# With both grippers closed, all 14 leader joints must remain within this
+# peak-to-peak window for the full duration before the leaders hold position.
+gripper_closed_threshold_deg: -3.0
+operator_idle_duration_sec: 1.5
+operator_idle_joint_delta_deg: 2.0
+
 prepare_sequence:
   - table_clearance
   - table_ready
