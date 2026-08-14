@@ -1,0 +1,21 @@
+schema_version: 1
+
+# STS3215 low-stiffness experiment values. These are deliberately conservative.
+# P_Coefficient is stored in EPROM; avoid repeatedly starting and stopping this test.
+arms:
+  left:
+    joint_1: {p_coefficient: 8, torque_limit: 50, position_deadband_deg: 0.5}
+    joint_2: {p_coefficient: 8, torque_limit: 50, position_deadband_deg: 0.5}
+    joint_3: {p_coefficient: 8, torque_limit: 50, position_deadband_deg: 0.5}
+    joint_4: {p_coefficient: 8, torque_limit: 50, position_deadband_deg: 0.5}
+    joint_5: {p_coefficient: 8, torque_limit: 50, position_deadband_deg: 0.5}
+    joint_6: {p_coefficient: 8, torque_limit: 50, position_deadband_deg: 0.5}
+    joint_7: {p_coefficient: 8, torque_limit: 50, position_deadband_deg: 0.5}
+  right:
+    joint_1: {p_coefficient: 8, torque_limit: 50, position_deadband_deg: 0.5}
+    joint_2: {p_coefficient: 8, torque_limit: 50, position_deadband_deg: 0.5}
+    joint_3: {p_coefficient: 8, torque_limit: 50, position_deadband_deg: 0.5}
+    joint_4: {p_coefficient: 8, torque_limit: 50, position_deadband_deg: 0.5}
+    joint_5: {p_coefficient: 8, torque_limit: 50, position_deadband_deg: 0.5}
+    joint_6: {p_coefficient: 8, torque_limit: 50, position_deadband_deg: 0.5}
+    joint_7: {p_coefficient: 8, torque_limit: 50, position_deadband_deg: 0.5}
