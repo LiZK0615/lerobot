@@ -50,14 +50,15 @@ def test_opening_either_gripper_releases_both_leader_arms():
     workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
     ready, now = drive_to_ready(workflow)
     start_output = workflow.handle_command(WorkflowCommand.START_RECORDING, ready, now)
-    assert start_output.torque is TorqueRequest.DISABLE
+    assert start_output.torque is TorqueRequest.ENABLE
+    assert start_output.goal == ready
 
     opened = dict(ready)
     opened["left_gripper.pos"] = -10.0
     output = workflow.tick(opened, now + 0.1)
 
     assert workflow.state is WorkflowState.RECORDING_MANUAL
-    assert output.torque is TorqueRequest.UNCHANGED
+    assert output.torque is TorqueRequest.DISABLE
     assert workflow.operator_engaged
 
 
@@ -71,6 +72,8 @@ def test_closed_grippers_do_not_trigger_until_operator_has_opened_one():
 
     assert workflow.state is WorkflowState.RECORDING_MANUAL
     assert output.torque is TorqueRequest.UNCHANGED
+    assert output.goal == ready
+    assert not workflow.operator_engaged
 
 
 def test_closed_and_quiet_near_ready_triggers_automatic_return_after_half_second():

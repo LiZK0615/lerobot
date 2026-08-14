@@ -120,11 +120,10 @@ class CollectionTeleopWorkflow:
         if command is WorkflowCommand.START_RECORDING:
             if self.state is not WorkflowState.READY:
                 raise RuntimeError("START_RECORDING requires READY")
-            self.motion.release()
             self.operator_engaged = False
             self.idle_detector.reset()
             self.state = WorkflowState.RECORDING_MANUAL
-            return WorkflowOutput(torque=TorqueRequest.DISABLE)
+            return WorkflowOutput(self.motion.step(current, now), TorqueRequest.ENABLE)
 
         if command is WorkflowCommand.RESET_DISCARD:
             if self.state not in {WorkflowState.READY, WorkflowState.RECORDING_MANUAL}:
@@ -172,10 +171,18 @@ class CollectionTeleopWorkflow:
 
         if self.state is WorkflowState.RECORDING_MANUAL:
             if self._any_gripper_open(current):
+                if not self.operator_engaged:
+                    self.motion.release()
+                    self.operator_engaged = True
+                    self.idle_detector.reset()
+                    return WorkflowOutput(torque=TorqueRequest.DISABLE)
                 self.operator_engaged = True
                 self.idle_detector.reset()
                 return WorkflowOutput()
-            if not self.operator_engaged or not self._near_table_ready(current):
+            if not self.operator_engaged:
+                self.idle_detector.reset()
+                return WorkflowOutput(self.motion.step(current, now))
+            if not self._near_table_ready(current):
                 self.idle_detector.reset()
                 return WorkflowOutput()
             if self.idle_detector.update(current, now):
