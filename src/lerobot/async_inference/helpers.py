@@ -221,18 +221,26 @@ class TimedData:
 @dataclass
 class TimedAction(TimedData):
     action: Action
+    session_id: int = 0
 
     def get_action(self):
         return self.action
+
+    def get_session_id(self):
+        return self.session_id
 
 
 @dataclass
 class TimedObservation(TimedData):
     observation: RawObservation
     must_go: bool = False
+    session_id: int = 0
 
     def get_observation(self):
         return self.observation
+
+    def get_session_id(self):
+        return self.session_id
 
 
 @dataclass

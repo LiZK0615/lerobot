@@ -135,6 +135,10 @@ class RobotClient:
         # Use an event for thread-safe coordination
         self.must_go = threading.Event()
         self.must_go.set()  # Initially set - observations qualify for direct processing
+        self._session_id = 0
+        self._session_active = threading.Event()
+        self._session_active.set()
+        self.receiver_error = threading.Event()
 
     @property
     def running(self):
@@ -179,6 +183,26 @@ class RobotClient:
 
         self.channel.close()
         self.logger.debug("Client stopped, channel closed")
+
+    def begin_session(self) -> int:
+        """Start an action epoch and reject chunks left over from older epochs."""
+        self._session_active.clear()
+        with self.action_queue_lock:
+            self.action_queue = Queue()
+        with self.latest_action_lock:
+            self.latest_action = -1
+        self.action_chunk_size = -1
+        self._session_id += 1
+        self.must_go.set()
+        self.receiver_error.clear()
+        self._session_active.set()
+        return self._session_id
+
+    def pause_session(self) -> None:
+        """Stop action acceptance immediately and discard queued policy actions."""
+        self._session_active.clear()
+        with self.action_queue_lock:
+            self.action_queue = Queue()
 
     def send_observation(
         self,
@@ -260,6 +284,7 @@ class RobotClient:
                     action=aggregate_fn(
                         current_action_queue[new_action.get_timestep()], new_action.get_action()
                     ),
+                    session_id=new_action.get_session_id(),
                 )
             )
 
@@ -285,6 +310,14 @@ class RobotClient:
                 deserialize_start = time.perf_counter()
                 timed_actions = pickle.loads(actions_chunk.data)  # nosec
                 deserialize_time = time.perf_counter() - deserialize_start
+
+                if not self._session_active.is_set():
+                    continue
+                timed_actions = [
+                    action for action in timed_actions if action.get_session_id() == self._session_id
+                ]
+                if not timed_actions:
+                    continue
 
                 # Log device type of received actions
                 if len(timed_actions) > 0:
@@ -357,6 +390,7 @@ class RobotClient:
 
             except grpc.RpcError as e:
                 self.logger.error(f"Error receiving actions: {e}")
+                self.receiver_error.set()
 
     def actions_available(self):
         """Check if there are actions available in the queue"""
@@ -420,6 +454,7 @@ class RobotClient:
                 timestamp=time.time(),  # need time.time() to compare timestamps across client and server
                 observation=raw_observation,
                 timestep=max(latest_action, 0),
+                session_id=self._session_id,
             )
 
             obs_capture_time = time.perf_counter() - start_time

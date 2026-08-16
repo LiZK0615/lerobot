@@ -226,7 +226,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             )
 
             with self._predicted_timesteps_lock:
-                self._predicted_timesteps.add(obs.get_timestep())
+                self._predicted_timesteps.add((obs.get_session_id(), obs.get_timestep()))
 
             start_time = time.perf_counter()
             action_chunk = self._predict_action_chunk(obs)
@@ -270,11 +270,13 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         with self._predicted_timesteps_lock:
             predicted_timesteps = self._predicted_timesteps
 
-        if obs.get_timestep() in predicted_timesteps:
+        if (obs.get_session_id(), obs.get_timestep()) in predicted_timesteps:
             self.logger.debug(f"Skipping observation #{obs.get_timestep()} - Timestep predicted already!")
             return False
 
-        elif observations_similar(obs, previous_obs, lerobot_features=self.lerobot_features):
+        elif obs.get_session_id() == previous_obs.get_session_id() and observations_similar(
+            obs, previous_obs, lerobot_features=self.lerobot_features
+        ):
             self.logger.debug(
                 f"Skipping observation #{obs.get_timestep()} - Observation too similar to last obs predicted!"
             )
@@ -309,13 +311,24 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         return False
 
-    def _time_action_chunk(self, t_0: float, action_chunk: list[torch.Tensor], i_0: int) -> list[TimedAction]:
+    def _time_action_chunk(
+        self,
+        t_0: float,
+        action_chunk: list[torch.Tensor],
+        i_0: int,
+        session_id: int = 0,
+    ) -> list[TimedAction]:
         """Turn a chunk of actions into a list of TimedAction instances,
         with the first action corresponding to t_0 and the rest corresponding to
         t_0 + i*environment_dt for i in range(len(action_chunk))
         """
         return [
-            TimedAction(timestamp=t_0 + i * self.config.environment_dt, timestep=i_0 + i, action=action)
+            TimedAction(
+                timestamp=t_0 + i * self.config.environment_dt,
+                timestep=i_0 + i,
+                action=action,
+                session_id=session_id,
+            )
             for i, action in enumerate(action_chunk)
         ]
 
@@ -383,7 +396,10 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         """5. Convert to TimedAction list"""
         action_chunk = self._time_action_chunk(
-            observation_t.get_timestamp(), list(action_tensor), observation_t.get_timestep()
+            observation_t.get_timestamp(),
+            list(action_tensor),
+            observation_t.get_timestep(),
+            observation_t.get_session_id(),
         )
         postprocess_stops = time.perf_counter()
         postprocessing_time = postprocess_stops - start_postprocess

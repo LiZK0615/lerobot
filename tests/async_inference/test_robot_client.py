@@ -72,7 +72,7 @@ def robot_client():
 # -----------------------------------------------------------------------------
 
 
-def _make_actions(start_ts: float, start_t: int, count: int):
+def _make_actions(start_ts: float, start_t: int, count: int, session_id: int = 0):
     """Generate `count` consecutive TimedAction objects starting at timestep `start_t`."""
     from lerobot.async_inference.helpers import TimedAction
 
@@ -82,7 +82,14 @@ def _make_actions(start_ts: float, start_t: int, count: int):
         timestep = start_t + i
         timestamp = start_ts + i * (1 / fps)
         action_tensor = torch.full((6,), timestep, dtype=torch.float32)
-        actions.append(TimedAction(action=action_tensor, timestep=timestep, timestamp=timestamp))
+        actions.append(
+            TimedAction(
+                action=action_tensor,
+                timestep=timestep,
+                timestamp=timestamp,
+                session_id=session_id,
+            )
+        )
     return actions
 
 
@@ -106,6 +113,22 @@ def test_update_action_queue_discards_stale(robot_client):
     resulting_timesteps = [a.get_timestep() for a in robot_client.action_queue.queue]
 
     assert resulting_timesteps == [5, 6, 7]
+
+
+def test_begin_and_pause_session_discard_queued_actions(robot_client):
+    robot_client.action_queue.put(_make_actions(time.time(), 0, 1)[0])
+
+    session_id = robot_client.begin_session()
+
+    assert session_id == 1
+    assert robot_client.action_queue.empty()
+    assert robot_client._session_active.is_set()
+
+    robot_client.action_queue.put(_make_actions(time.time(), 0, 1, session_id)[0])
+    robot_client.pause_session()
+
+    assert robot_client.action_queue.empty()
+    assert not robot_client._session_active.is_set()
 
 
 @pytest.mark.parametrize(
@@ -172,6 +195,17 @@ def test_aggregate_action_queues_combines_actions_in_overlap(
         weight_old * current_actions[1].get_action() + weight_new * incoming[-2].get_action(),
     )
     assert torch.allclose(queue_non_overlap_actions[0].get_action(), incoming[-1].get_action())
+
+
+def test_aggregate_preserves_session_id(robot_client):
+    current = _make_actions(time.time(), 5, 1, session_id=7)[0]
+    incoming = _make_actions(time.time(), 5, 1, session_id=7)[0]
+    robot_client.latest_action = 4
+    robot_client.action_queue.put(current)
+
+    robot_client._aggregate_action_queues([incoming])
+
+    assert robot_client.action_queue.get_nowait().get_session_id() == 7
 
 
 @pytest.mark.parametrize(

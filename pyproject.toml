@@ -369,6 +369,7 @@ lerobot-openarm-mini-rviz="lerobot.scripts.lerobot_openarm_mini_rviz:main"
 lerobot-openarm-mini-ros2-teleop="lerobot.scripts.lerobot_openarm_mini_ros2_teleop:main"
 lerobot-openarm-mini-compliance-test="lerobot.scripts.lerobot_openarm_mini_compliance_test:main"
 lerobot-openarm-record="lerobot.scripts.lerobot_openarm_record:main"
+lerobot-openarm-policy="lerobot.scripts.lerobot_openarm_policy:main"
 
 # ---------------- Tool Configurations ----------------
 

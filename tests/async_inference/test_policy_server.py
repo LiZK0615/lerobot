@@ -140,6 +140,12 @@ def test_time_action_chunk(policy_server):
         assert abs(ta.get_timestamp() - expected_ts) < 1e-6
 
 
+def test_time_action_chunk_preserves_session(policy_server):
+    timed_actions = policy_server._time_action_chunk(time.time(), [torch.zeros(6)], 0, session_id=9)
+
+    assert timed_actions[0].get_session_id() == 9
+
+
 def test_maybe_enqueue_observation_must_go(policy_server):
     """An observation with `must_go=True` is always enqueued."""
     obs = _make_obs(torch.zeros(6), must_go=True)
@@ -175,7 +181,7 @@ def test_obs_sanity_checks(policy_server):
     prev = _make_obs(torch.zeros(6), timestep=0)
 
     # Case 1 – timestep already predicted
-    policy_server._predicted_timesteps.add(1)
+    policy_server._predicted_timesteps.add((0, 1))
     obs_same_ts = _make_obs(torch.ones(6), timestep=1)
     assert policy_server._obs_sanity_checks(obs_same_ts, prev) is False
 
