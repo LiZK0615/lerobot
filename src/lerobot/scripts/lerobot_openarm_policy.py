@@ -28,6 +28,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--camera-config", required=True)
     parser.add_argument("--server-address", default="192.168.123.20:8080")
+    parser.add_argument("--policy-type", choices=("smolvla", "pi0"), default="smolvla")
     parser.add_argument("--policy-path", required=True)
     parser.add_argument("--task", default=DEFAULT_TASK)
     parser.add_argument("--fps", type=int, default=30)
@@ -57,7 +58,8 @@ def _return_to_ready(client: RobotClient, args: argparse.Namespace, keyboard=Non
         minimum_duration_sec=args.return_minimum_duration_sec,
         tolerance=args.ready_tolerance,
     )
-    motion.start(client.robot.get_state(), time.monotonic())
+    current_state = client.robot.get_state()
+    motion.start(current_state, time.monotonic())
     deadline = time.monotonic() + args.return_timeout_sec
     period = 1.0 / args.fps
 
@@ -67,8 +69,12 @@ def _return_to_ready(client: RobotClient, args: argparse.Namespace, keyboard=Non
         if key in {" ", "\x1b"}:
             _hold_current_position(client)
             raise ReturnInterruptedError(exit_requested=key == "\x1b")
+        # Drain the ROS snapshot socket and validate feedback on every control
+        # cycle. Waiting until the trajectory duration elapsed allowed old UDP
+        # snapshots to fill the socket and made fresh feedback appear stale.
+        current_state = client.robot.get_state()
         client.robot.send_action(motion.command(started))
-        if motion.trajectory_complete(started) and motion.target_reached(client.robot.get_state()):
+        if motion.trajectory_complete(started) and motion.target_reached(current_state):
             return
         time.sleep(max(0.0, period - (time.monotonic() - started)))
     _hold_current_position(client)
@@ -126,6 +132,11 @@ def _run_supervisor(client: RobotClient, args: argparse.Namespace) -> None:
                 state = PolicyRunState.INFERENCE
                 _print_controls(state)
 
+            if state in {PolicyRunState.READY, PolicyRunState.HOLD}:
+                # Keep consuming ROS snapshots while waiting for a key so that
+                # the next transition always starts from fresh measured state.
+                client.robot.get_state()
+
             if state is PolicyRunState.INFERENCE:
                 if client.receiver_error.is_set():
                     raise RuntimeError("与推理服务器的动作流连接异常")
@@ -177,7 +188,7 @@ def main() -> None:
         source_max_age_ms=args.source_max_age_ms,
     )
     config = RobotClientConfig(
-        policy_type="smolvla",
+        policy_type=args.policy_type,
         pretrained_name_or_path=args.policy_path,
         robot=robot_config,
         actions_per_chunk=args.actions_per_chunk,

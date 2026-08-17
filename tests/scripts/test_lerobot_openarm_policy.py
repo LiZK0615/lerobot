@@ -6,6 +6,7 @@ from lerobot.openarm_data_collection.types import JOINT_NAMES
 from lerobot.openarm_policy_runtime import TABLE_READY
 from lerobot.scripts.lerobot_openarm_policy import (
     ReturnInterruptedError,
+    _parser,
     _hold_current_position,
     _return_to_ready,
 )
@@ -15,8 +16,13 @@ class FakeRobot:
     def __init__(self, state):
         self.state = dict(state)
         self.actions = []
+        self.get_state_calls = 0
+        self.fail_state_after = None
 
     def get_state(self):
+        self.get_state_calls += 1
+        if self.fail_state_after is not None and self.get_state_calls > self.fail_state_after:
+            raise TimeoutError("ROS joint state is stale")
         return dict(self.state)
 
     def send_action(self, action):
@@ -53,6 +59,20 @@ def _args():
     )
 
 
+def test_parser_defaults_to_smolvla_policy():
+    args = _parser().parse_args(["--camera-config=cameras.yaml", "--policy-path=checkpoint"])
+
+    assert args.policy_type == "smolvla"
+
+
+def test_parser_accepts_pi0_policy():
+    args = _parser().parse_args(
+        ["--camera-config=cameras.yaml", "--policy-type=pi0", "--policy-path=checkpoint"]
+    )
+
+    assert args.policy_type == "pi0"
+
+
 def test_hold_sends_measured_state():
     state = dict(zip(JOINT_NAMES, [0.25] * 16, strict=True))
     client = FakeClient(state)
@@ -71,6 +91,19 @@ def test_return_to_ready_reaches_named_pose():
 
     assert client.paused == 1
     assert tuple(client.robot.actions[-1][name] for name in JOINT_NAMES) == TABLE_READY
+    assert client.robot.get_state_calls > 2
+
+
+def test_return_to_ready_detects_stale_feedback_before_trajectory_finishes():
+    state = dict(zip(JOINT_NAMES, [0.0] * 16, strict=True))
+    client = FakeClient(state)
+    client.robot.fail_state_after = 2
+
+    with pytest.raises(TimeoutError, match="ROS joint state is stale"):
+        _return_to_ready(client, _args())
+
+    assert client.paused == 1
+    assert len(client.robot.actions) == 1
 
 
 def test_space_interrupts_return_and_holds_measured_position():
