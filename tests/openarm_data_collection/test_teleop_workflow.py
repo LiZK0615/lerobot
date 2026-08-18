@@ -64,7 +64,7 @@ def test_opening_left_gripper_releases_only_left_leader_arm():
     assert workflow.operator_engaged
 
 
-def test_each_gripper_independently_releases_and_holds_its_leader_arm():
+def test_each_gripper_releases_its_side_once_and_closing_does_not_reenable_it():
     workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
     ready, now = drive_to_ready(workflow)
     workflow.handle_command(WorkflowCommand.START_RECORDING, ready, now)
@@ -84,14 +84,15 @@ def test_each_gripper_independently_releases_and_holds_its_leader_arm():
     right_open = dict(ready)
     right_open["right_gripper.pos"] = -10.0
     output = workflow.tick(right_open, now + 0.3)
-    assert output.left_torque is TorqueRequest.ENABLE
+    assert output.left_torque is TorqueRequest.UNCHANGED
     assert output.right_torque is TorqueRequest.UNCHANGED
-    assert output.goal == right_open
+    assert output.goal is None
+    assert workflow.side_engaged == {"left": True, "right": True}
 
     output = workflow.tick(ready, now + 0.4)
     assert output.left_torque is TorqueRequest.UNCHANGED
-    assert output.right_torque is TorqueRequest.ENABLE
-    assert output.goal == ready
+    assert output.right_torque is TorqueRequest.UNCHANGED
+    assert output.goal is None
 
 
 def test_closed_grippers_do_not_trigger_until_operator_has_opened_one():
@@ -121,7 +122,7 @@ def test_idle_timer_starts_only_after_both_grippers_close():
 
     closed = dict(ready)
     closed_output = workflow.tick(closed, now + 10.1)
-    assert closed_output.right_torque is TorqueRequest.ENABLE
+    assert closed_output.right_torque is TorqueRequest.UNCHANGED
     before_timeout = workflow.tick(closed, now + 10.59)
     assert before_timeout.left_torque is TorqueRequest.UNCHANGED
     assert before_timeout.right_torque is TorqueRequest.UNCHANGED
@@ -145,7 +146,7 @@ def test_closed_and_quiet_far_from_ready_still_triggers_return():
     far = dict(ready)
     far["left_joint_1.pos"] += 18.0
     closed_output = workflow.tick(far, now + 0.2)
-    assert closed_output.left_torque is TorqueRequest.ENABLE
+    assert closed_output.left_torque is TorqueRequest.UNCHANGED
     assert closed_output.right_torque is TorqueRequest.UNCHANGED
     output = workflow.tick(far, now + 1.0)
 

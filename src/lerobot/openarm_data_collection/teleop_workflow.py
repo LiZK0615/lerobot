@@ -99,6 +99,7 @@ class CollectionTeleopWorkflow:
         self.motion = PresetMotion(preset_config)
         self.state = WorkflowState.CONNECTING
         self.operator_engaged = False
+        self.side_engaged = dict.fromkeys(SIDES, False)
         self.gripper_open = dict.fromkeys(SIDES, False)
         self.idle_detector = JointIdleDetector(
             preset_config.auto_return_idle_duration_sec,
@@ -126,6 +127,7 @@ class CollectionTeleopWorkflow:
             if self.state is not WorkflowState.READY:
                 raise RuntimeError("START_RECORDING requires READY")
             self.operator_engaged = False
+            self.side_engaged = dict.fromkeys(SIDES, False)
             self.gripper_open = dict.fromkeys(SIDES, False)
             self.idle_detector.reset()
             self.state = WorkflowState.RECORDING_MANUAL
@@ -140,6 +142,7 @@ class CollectionTeleopWorkflow:
                 raise RuntimeError(f"RESET_DISCARD is not allowed from {self.state.value}")
             self.motion.start_prepare(current, now)
             self.operator_engaged = False
+            self.side_engaged = dict.fromkeys(SIDES, False)
             self.gripper_open = dict.fromkeys(SIDES, False)
             self.idle_detector.reset()
             self.state = WorkflowState.RESETTING_DISCARD
@@ -205,14 +208,12 @@ class CollectionTeleopWorkflow:
 
             for side in SIDES:
                 request = TorqueRequest.UNCHANGED
-                if current_gripper_open[side] and not self.gripper_open[side]:
+                if current_gripper_open[side] and not self.side_engaged[side]:
                     request = TorqueRequest.DISABLE
+                    self.side_engaged[side] = True
                     if not self.operator_engaged:
                         self.motion.release()
                     self.operator_engaged = True
-                elif not current_gripper_open[side] and self.gripper_open[side]:
-                    request = TorqueRequest.ENABLE
-                    goal = dict(current)
                 if side == "left":
                     left_torque = request
                 else:

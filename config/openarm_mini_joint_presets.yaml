@@ -8,9 +8,9 @@ waypoint_pause_sec: 0.5
 # Both Mini leaders and OpenArm followers must satisfy this same final gate.
 target_tolerance_rad: 0.10
 
-# During recording, opening either Mini gripper marks operator engagement.
-# After engagement, both grippers closed and a quiet window trigger an
-# automatic direct return to table_ready from the current pose.
+# During recording, opening a Mini gripper releases that side for the rest of
+# the episode; closing it does not re-enable torque. After engagement, both
+# grippers closed and a quiet window trigger an automatic direct return.
 gripper_closed_threshold_deg: -3.0
 auto_return_idle_duration_sec: 0.5
 auto_return_idle_joint_delta_deg: 2.0
