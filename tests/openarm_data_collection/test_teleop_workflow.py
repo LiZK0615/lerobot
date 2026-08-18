@@ -22,7 +22,8 @@ def action(value=0.0):
 def drive_to_ready(workflow, now=0.0):
     current = action()
     output = workflow.initialize(current, now)
-    assert output.torque is TorqueRequest.ENABLE
+    assert output.left_torque is TorqueRequest.ENABLE
+    assert output.right_torque is TorqueRequest.ENABLE
 
     clearance = ros_positions_to_mapped_action(workflow.config.waypoints["table_clearance"])
     now += workflow.motion.segment_duration_sec
@@ -45,11 +46,12 @@ def test_default_clutch_thresholds_are_loaded_from_preset_yaml():
     assert config.auto_return_idle_joint_delta_deg == 2.0
 
 
-def test_opening_either_gripper_releases_both_leader_arms():
+def test_opening_left_gripper_releases_only_left_leader_arm():
     workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
     ready, now = drive_to_ready(workflow)
     start_output = workflow.handle_command(WorkflowCommand.START_RECORDING, ready, now)
-    assert start_output.torque is TorqueRequest.ENABLE
+    assert start_output.left_torque is TorqueRequest.ENABLE
+    assert start_output.right_torque is TorqueRequest.ENABLE
     assert start_output.goal == ready
 
     opened = dict(ready)
@@ -57,8 +59,39 @@ def test_opening_either_gripper_releases_both_leader_arms():
     output = workflow.tick(opened, now + 0.1)
 
     assert workflow.state is WorkflowState.RECORDING_MANUAL
-    assert output.torque is TorqueRequest.DISABLE
+    assert output.left_torque is TorqueRequest.DISABLE
+    assert output.right_torque is TorqueRequest.UNCHANGED
     assert workflow.operator_engaged
+
+
+def test_each_gripper_independently_releases_and_holds_its_leader_arm():
+    workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
+    ready, now = drive_to_ready(workflow)
+    workflow.handle_command(WorkflowCommand.START_RECORDING, ready, now)
+
+    left_open = dict(ready)
+    left_open["left_gripper.pos"] = -10.0
+    output = workflow.tick(left_open, now + 0.1)
+    assert output.left_torque is TorqueRequest.DISABLE
+    assert output.right_torque is TorqueRequest.UNCHANGED
+
+    both_open = dict(left_open)
+    both_open["right_gripper.pos"] = -10.0
+    output = workflow.tick(both_open, now + 0.2)
+    assert output.left_torque is TorqueRequest.UNCHANGED
+    assert output.right_torque is TorqueRequest.DISABLE
+
+    right_open = dict(ready)
+    right_open["right_gripper.pos"] = -10.0
+    output = workflow.tick(right_open, now + 0.3)
+    assert output.left_torque is TorqueRequest.ENABLE
+    assert output.right_torque is TorqueRequest.UNCHANGED
+    assert output.goal == right_open
+
+    output = workflow.tick(ready, now + 0.4)
+    assert output.left_torque is TorqueRequest.UNCHANGED
+    assert output.right_torque is TorqueRequest.ENABLE
+    assert output.goal == ready
 
 
 def test_closed_grippers_do_not_trigger_until_operator_has_opened_one():
@@ -70,12 +103,13 @@ def test_closed_grippers_do_not_trigger_until_operator_has_opened_one():
     output = workflow.tick(ready, now + 1.0)
 
     assert workflow.state is WorkflowState.RECORDING_MANUAL
-    assert output.torque is TorqueRequest.UNCHANGED
+    assert output.left_torque is TorqueRequest.UNCHANGED
+    assert output.right_torque is TorqueRequest.UNCHANGED
     assert output.goal == ready
     assert not workflow.operator_engaged
 
 
-def test_closed_and_quiet_triggers_automatic_return_after_half_second():
+def test_idle_timer_starts_only_after_both_grippers_close():
     workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
     ready, now = drive_to_ready(workflow)
     workflow.handle_command(WorkflowCommand.START_RECORDING, ready, now)
@@ -83,14 +117,20 @@ def test_closed_and_quiet_triggers_automatic_return_after_half_second():
     opened = dict(ready)
     opened["right_gripper.pos"] = -20.0
     workflow.tick(opened, now + 0.1)
+    workflow.tick(opened, now + 10.0)
 
     closed = dict(ready)
-    assert workflow.tick(closed, now + 0.2).torque is TorqueRequest.UNCHANGED
-    assert workflow.tick(closed, now + 0.69).torque is TorqueRequest.UNCHANGED
-    output = workflow.tick(closed, now + 0.71)
+    closed_output = workflow.tick(closed, now + 10.1)
+    assert closed_output.right_torque is TorqueRequest.ENABLE
+    before_timeout = workflow.tick(closed, now + 10.59)
+    assert before_timeout.left_torque is TorqueRequest.UNCHANGED
+    assert before_timeout.right_torque is TorqueRequest.UNCHANGED
+    assert workflow.state is WorkflowState.RECORDING_MANUAL
+    output = workflow.tick(closed, now + 10.61)
 
     assert workflow.state is WorkflowState.AUTO_RETURNING
-    assert output.torque is TorqueRequest.ENABLE
+    assert output.left_torque is TorqueRequest.ENABLE
+    assert output.right_torque is TorqueRequest.ENABLE
     assert output.goal == closed
 
 
@@ -104,11 +144,14 @@ def test_closed_and_quiet_far_from_ready_still_triggers_return():
 
     far = dict(ready)
     far["left_joint_1.pos"] += 18.0
-    assert workflow.tick(far, now + 0.2).torque is TorqueRequest.UNCHANGED
+    closed_output = workflow.tick(far, now + 0.2)
+    assert closed_output.left_torque is TorqueRequest.ENABLE
+    assert closed_output.right_torque is TorqueRequest.UNCHANGED
     output = workflow.tick(far, now + 1.0)
 
     assert workflow.state is WorkflowState.AUTO_RETURNING
-    assert output.torque is TorqueRequest.ENABLE
+    assert output.left_torque is TorqueRequest.ENABLE
+    assert output.right_torque is TorqueRequest.ENABLE
     assert output.goal == far
 
 
@@ -124,10 +167,13 @@ def test_joint_motion_over_two_degrees_restarts_auto_return_quiet_detection():
     moved = dict(ready)
     moved["left_joint_1.pos"] += 2.1
     workflow.tick(moved, now + 0.4)
-    assert workflow.tick(moved, now + 0.61).torque is TorqueRequest.UNCHANGED
+    output = workflow.tick(moved, now + 0.61)
+    assert output.left_torque is TorqueRequest.UNCHANGED
+    assert output.right_torque is TorqueRequest.UNCHANGED
     output = workflow.tick(moved, now + 0.91)
 
-    assert output.torque is TorqueRequest.ENABLE
+    assert output.left_torque is TorqueRequest.ENABLE
+    assert output.right_torque is TorqueRequest.ENABLE
     assert workflow.state is WorkflowState.AUTO_RETURNING
 
 
@@ -157,7 +203,8 @@ def test_discard_reset_still_returns_through_clearance_to_ready():
     output = workflow.handle_command(WorkflowCommand.RESET_DISCARD, ready, now + 0.1)
 
     assert workflow.state is WorkflowState.RESETTING_DISCARD
-    assert output.torque is TorqueRequest.ENABLE
+    assert output.left_torque is TorqueRequest.ENABLE
+    assert output.right_torque is TorqueRequest.ENABLE
     assert workflow.motion.waypoint_name == "table_clearance"
 
 
@@ -165,13 +212,15 @@ def test_shutdown_targets_clearance_and_then_disables_leader_torque():
     workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
     ready, now = drive_to_ready(workflow)
     output = workflow.handle_command(WorkflowCommand.SHUTDOWN, ready, now + 0.1)
-    assert output.torque is TorqueRequest.ENABLE
+    assert output.left_torque is TorqueRequest.ENABLE
+    assert output.right_torque is TorqueRequest.ENABLE
 
     clearance = ros_positions_to_mapped_action(workflow.config.waypoints["table_clearance"])
     output = workflow.tick(clearance, now + 0.1 + workflow.motion.segment_duration_sec)
 
     assert workflow.state is WorkflowState.SHUTDOWN_COMPLETE
-    assert output.torque is TorqueRequest.DISABLE
+    assert output.left_torque is TorqueRequest.DISABLE
+    assert output.right_torque is TorqueRequest.DISABLE
 
 
 def test_gripper_difference_does_not_prevent_preset_completion():

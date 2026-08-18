@@ -164,8 +164,8 @@ class RecorderFeedback:
         if self._last_state is SessionState.ARMING and status.state is SessionState.RECORDING:
             print(f"[RECORDING] episode={status.episode_index} started", flush=True)
             print(
-                "[RECORDING] open either gripper to engage; finish by closing both "
-                "and holding all leader joints still",
+                "[RECORDING] each open gripper releases only its own leader arm; "
+                "close both to start the 0.5s stillness timer",
                 flush=True,
             )
             self._last_progress_ns = now_ns

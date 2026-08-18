@@ -21,7 +21,6 @@ from lerobot.scripts.lerobot_openarm_mini_ros2_teleop import (
 SIDES = ("left", "right")
 JOINT_NAMES = tuple(f"joint_{index}" for index in range(1, 8))
 JOINT_ACTION_NAMES = tuple(f"{side}_{joint}.pos" for side in SIDES for joint in JOINT_NAMES)
-GRIPPER_ACTION_NAMES = tuple(f"{side}_gripper.pos" for side in SIDES)
 
 
 class WorkflowState(str, Enum):
@@ -54,7 +53,8 @@ class TorqueRequest(str, Enum):
 @dataclass(frozen=True)
 class WorkflowOutput:
     goal: dict[str, float] | None = None
-    torque: TorqueRequest = TorqueRequest.UNCHANGED
+    left_torque: TorqueRequest = TorqueRequest.UNCHANGED
+    right_torque: TorqueRequest = TorqueRequest.UNCHANGED
 
 
 @dataclass(frozen=True)
@@ -99,6 +99,7 @@ class CollectionTeleopWorkflow:
         self.motion = PresetMotion(preset_config)
         self.state = WorkflowState.CONNECTING
         self.operator_engaged = False
+        self.gripper_open = dict.fromkeys(SIDES, False)
         self.idle_detector = JointIdleDetector(
             preset_config.auto_return_idle_duration_sec,
             preset_config.auto_return_idle_joint_delta_deg,
@@ -109,7 +110,11 @@ class CollectionTeleopWorkflow:
             raise RuntimeError("workflow is already initialized")
         self.motion.start_prepare(current, now)
         self.state = WorkflowState.PREPARING
-        return WorkflowOutput(dict(current), TorqueRequest.ENABLE)
+        return WorkflowOutput(
+            goal=dict(current),
+            left_torque=TorqueRequest.ENABLE,
+            right_torque=TorqueRequest.ENABLE,
+        )
 
     def handle_command(
         self,
@@ -121,18 +126,28 @@ class CollectionTeleopWorkflow:
             if self.state is not WorkflowState.READY:
                 raise RuntimeError("START_RECORDING requires READY")
             self.operator_engaged = False
+            self.gripper_open = dict.fromkeys(SIDES, False)
             self.idle_detector.reset()
             self.state = WorkflowState.RECORDING_MANUAL
-            return WorkflowOutput(self.motion.step(current, now), TorqueRequest.ENABLE)
+            return WorkflowOutput(
+                goal=self.motion.step(current, now),
+                left_torque=TorqueRequest.ENABLE,
+                right_torque=TorqueRequest.ENABLE,
+            )
 
         if command is WorkflowCommand.RESET_DISCARD:
             if self.state not in {WorkflowState.READY, WorkflowState.RECORDING_MANUAL}:
                 raise RuntimeError(f"RESET_DISCARD is not allowed from {self.state.value}")
             self.motion.start_prepare(current, now)
             self.operator_engaged = False
+            self.gripper_open = dict.fromkeys(SIDES, False)
             self.idle_detector.reset()
             self.state = WorkflowState.RESETTING_DISCARD
-            return WorkflowOutput(dict(current), TorqueRequest.ENABLE)
+            return WorkflowOutput(
+                goal=dict(current),
+                left_torque=TorqueRequest.ENABLE,
+                right_torque=TorqueRequest.ENABLE,
+            )
 
         if command is WorkflowCommand.FINISH_DECISION:
             if self.state is not WorkflowState.AWAITING_DECISION:
@@ -145,11 +160,18 @@ class CollectionTeleopWorkflow:
                 raise RuntimeError("SHUTDOWN requires READY")
             self.motion.start_clearance_only(current, now)
             self.state = WorkflowState.SHUTTING_DOWN
-            return WorkflowOutput(dict(current), TorqueRequest.ENABLE)
+            return WorkflowOutput(
+                goal=dict(current),
+                left_torque=TorqueRequest.ENABLE,
+                right_torque=TorqueRequest.ENABLE,
+            )
 
         if command is WorkflowCommand.STOP:
             self.state = WorkflowState.SHUTDOWN_COMPLETE
-            return WorkflowOutput(torque=TorqueRequest.DISABLE)
+            return WorkflowOutput(
+                left_torque=TorqueRequest.DISABLE,
+                right_torque=TorqueRequest.DISABLE,
+            )
         raise RuntimeError(f"unsupported workflow command {command}")
 
     def tick(self, current: Mapping[str, float], now: float) -> WorkflowOutput:
@@ -162,7 +184,11 @@ class CollectionTeleopWorkflow:
             if self.motion.phase == MotionPhase.HOLDING:
                 if self.state is WorkflowState.SHUTTING_DOWN:
                     self.state = WorkflowState.SHUTDOWN_COMPLETE
-                    return WorkflowOutput(goal, TorqueRequest.DISABLE)
+                    return WorkflowOutput(
+                        goal=goal,
+                        left_torque=TorqueRequest.DISABLE,
+                        right_torque=TorqueRequest.DISABLE,
+                    )
                 self.state = WorkflowState.READY
             return WorkflowOutput(goal)
 
@@ -170,22 +196,62 @@ class CollectionTeleopWorkflow:
             return WorkflowOutput(self.motion.step(current, now))
 
         if self.state is WorkflowState.RECORDING_MANUAL:
-            if self._any_gripper_open(current):
-                if not self.operator_engaged:
-                    self.motion.release()
+            current_gripper_open = {
+                side: self._gripper_is_open(current, side) for side in SIDES
+            }
+            left_torque = TorqueRequest.UNCHANGED
+            right_torque = TorqueRequest.UNCHANGED
+            goal = None
+
+            for side in SIDES:
+                request = TorqueRequest.UNCHANGED
+                if current_gripper_open[side] and not self.gripper_open[side]:
+                    request = TorqueRequest.DISABLE
+                    if not self.operator_engaged:
+                        self.motion.release()
                     self.operator_engaged = True
-                    self.idle_detector.reset()
-                    return WorkflowOutput(torque=TorqueRequest.DISABLE)
-                self.operator_engaged = True
+                elif not current_gripper_open[side] and self.gripper_open[side]:
+                    request = TorqueRequest.ENABLE
+                    goal = dict(current)
+                if side == "left":
+                    left_torque = request
+                else:
+                    right_torque = request
+
+            both_just_closed = any(self.gripper_open.values()) and not any(
+                current_gripper_open.values()
+            )
+            self.gripper_open = current_gripper_open
+
+            if any(current_gripper_open.values()):
                 self.idle_detector.reset()
-                return WorkflowOutput()
+                return WorkflowOutput(
+                    goal=goal,
+                    left_torque=left_torque,
+                    right_torque=right_torque,
+                )
             if not self.operator_engaged:
                 self.idle_detector.reset()
-                return WorkflowOutput(self.motion.step(current, now))
+                return WorkflowOutput(
+                    goal=self.motion.step(current, now),
+                    left_torque=left_torque,
+                    right_torque=right_torque,
+                )
+            if both_just_closed:
+                self.idle_detector.reset()
             if self.idle_detector.update(current, now):
                 self.motion.start_direct_ready(current, now)
                 self.state = WorkflowState.AUTO_RETURNING
-                return WorkflowOutput(dict(current), TorqueRequest.ENABLE)
+                return WorkflowOutput(
+                    goal=dict(current),
+                    left_torque=TorqueRequest.ENABLE,
+                    right_torque=TorqueRequest.ENABLE,
+                )
+            return WorkflowOutput(
+                goal=goal,
+                left_torque=left_torque,
+                right_torque=right_torque,
+            )
 
         if self.state is WorkflowState.AUTO_RETURNING:
             goal = self.motion.step(current, now)
@@ -197,9 +263,9 @@ class CollectionTeleopWorkflow:
             return WorkflowOutput(self.motion.step(current, now))
         return WorkflowOutput()
 
-    def _any_gripper_open(self, current: Mapping[str, float]) -> bool:
+    def _gripper_is_open(self, current: Mapping[str, float], side: str) -> bool:
         threshold = self.config.gripper_closed_threshold_deg
-        return any(float(current[name]) < threshold for name in GRIPPER_ACTION_NAMES)
+        return float(current[f"{side}_gripper.pos"]) < threshold
 
 
 def _joint_goals(action: Mapping[str, float], side: str) -> dict[str, float]:
@@ -229,7 +295,7 @@ def run_teleop_worker(
     preset = load_preset_config(config.preset_config)
     workflow = CollectionTeleopWorkflow(preset)
     sequence = starting_sequence()
-    torque_enabled = False
+    torque_enabled = dict.fromkeys(SIDES, False)
     last_request_id = 0
     last_status: tuple[str, int, str | None] | None = None
     last_status_time = 0.0
@@ -247,35 +313,42 @@ def run_teleop_worker(
             last_status = status
             last_status_time = now
 
-    def set_joint_torque(enabled: bool, seed: Mapping[str, float] | None = None) -> None:
-        nonlocal torque_enabled
-        if enabled == torque_enabled:
+    def set_joint_torque(
+        side: str,
+        enabled: bool,
+        seed: Mapping[str, float] | None = None,
+    ) -> None:
+        if enabled == torque_enabled[side]:
             return
+        arm = teleop.left_arm if side == "left" else teleop.right_arm
         if enabled:
             if seed is None:
                 raise RuntimeError("enabling leader torque requires a measured seed")
-            teleop.left_arm.write_goal_positions(_joint_goals(seed, "left"))
-            teleop.right_arm.write_goal_positions(_joint_goals(seed, "right"))
+            arm.write_goal_positions(_joint_goals(seed, side))
             try:
-                teleop.left_arm.bus.enable_torque(list(JOINT_NAMES))
-                teleop.right_arm.bus.enable_torque(list(JOINT_NAMES))
+                arm.bus.enable_torque(list(JOINT_NAMES))
             except Exception:
-                teleop.left_arm.bus.disable_torque(list(JOINT_NAMES))
-                teleop.right_arm.bus.disable_torque(list(JOINT_NAMES))
+                arm.bus.disable_torque(list(JOINT_NAMES))
                 raise
         else:
-            teleop.left_arm.bus.disable_torque(list(JOINT_NAMES))
-            teleop.right_arm.bus.disable_torque(list(JOINT_NAMES))
-        torque_enabled = enabled
+            arm.bus.disable_torque(list(JOINT_NAMES))
+        torque_enabled[side] = enabled
 
     def apply_output(output: WorkflowOutput, current: Mapping[str, float]) -> None:
-        if output.torque is TorqueRequest.DISABLE:
-            set_joint_torque(False)
-        if output.torque is TorqueRequest.ENABLE:
-            set_joint_torque(True, output.goal or current)
-        if output.goal is not None and torque_enabled:
-            teleop.left_arm.write_goal_positions(_joint_goals(output.goal, "left"))
-            teleop.right_arm.write_goal_positions(_joint_goals(output.goal, "right"))
+        requests = {
+            "left": output.left_torque,
+            "right": output.right_torque,
+        }
+        for side, request in requests.items():
+            if request is TorqueRequest.DISABLE:
+                set_joint_torque(side, False)
+            elif request is TorqueRequest.ENABLE:
+                set_joint_torque(side, True, output.goal or current)
+        if output.goal is not None:
+            for side in SIDES:
+                if torque_enabled[side]:
+                    arm = teleop.left_arm if side == "left" else teleop.right_arm
+                    arm.write_goal_positions(_joint_goals(output.goal, side))
 
     status_queue.put({"state": WorkflowState.CONNECTING.value, "request_id": 0, "error": None})
     try:
