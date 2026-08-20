@@ -1,9 +1,12 @@
+import math
+
 from lerobot.openarm_data_collection.teleop_workflow import (
     CollectionTeleopWorkflow,
     JOINT_ACTION_NAMES,
     TorqueRequest,
     WorkflowCommand,
     WorkflowState,
+    filter_recording_action,
 )
 from lerobot.scripts.lerobot_openarm_mini_ros2_teleop import (
     DEFAULT_PRESET_CONFIG_PATH,
@@ -44,6 +47,7 @@ def test_default_clutch_thresholds_are_loaded_from_preset_yaml():
     assert config.gripper_closed_threshold_deg == -3.0
     assert config.auto_return_idle_duration_sec == 0.5
     assert config.auto_return_idle_joint_delta_deg == 2.0
+    assert config.auto_return_j1_tolerance_rad == 0.5
 
 
 def test_opening_left_gripper_releases_only_left_leader_arm():
@@ -135,7 +139,7 @@ def test_idle_timer_starts_only_after_both_grippers_close():
     assert output.goal == closed
 
 
-def test_closed_and_quiet_far_from_ready_still_triggers_return():
+def test_closed_and_quiet_far_j1_blocks_return_until_j1_is_near_ready():
     workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
     ready, now = drive_to_ready(workflow)
     workflow.handle_command(WorkflowCommand.START_RECORDING, ready, now)
@@ -144,16 +148,66 @@ def test_closed_and_quiet_far_from_ready_still_triggers_return():
     workflow.tick(opened, now + 0.1)
 
     far = dict(ready)
-    far["left_joint_1.pos"] += 18.0
+    far["left_joint_1.pos"] += math.degrees(0.51)
     closed_output = workflow.tick(far, now + 0.2)
     assert closed_output.left_torque is TorqueRequest.UNCHANGED
     assert closed_output.right_torque is TorqueRequest.UNCHANGED
     output = workflow.tick(far, now + 1.0)
 
+    assert workflow.state is WorkflowState.RECORDING_MANUAL
+    assert output.left_torque is TorqueRequest.UNCHANGED
+    assert output.right_torque is TorqueRequest.UNCHANGED
+
+    workflow.tick(ready, now + 1.1)
+    assert workflow.tick(ready, now + 1.59).left_torque is TorqueRequest.UNCHANGED
+    output = workflow.tick(ready, now + 1.61)
+
     assert workflow.state is WorkflowState.AUTO_RETURNING
     assert output.left_torque is TorqueRequest.ENABLE
     assert output.right_torque is TorqueRequest.ENABLE
-    assert output.goal == far
+
+
+def test_inactive_arm_vibration_does_not_block_active_arm_idle_detection():
+    workflow = CollectionTeleopWorkflow(load_preset_config(DEFAULT_PRESET_CONFIG_PATH))
+    ready, now = drive_to_ready(workflow)
+    workflow.handle_command(WorkflowCommand.START_RECORDING, ready, now)
+
+    right_open = dict(ready)
+    right_open["right_gripper.pos"] = -20.0
+    workflow.tick(right_open, now + 0.1)
+    workflow.tick(ready, now + 0.2)
+
+    left_vibration = dict(ready)
+    left_vibration["left_joint_2.pos"] += 15.0
+    workflow.tick(left_vibration, now + 0.4)
+    output = workflow.tick(ready, now + 0.71)
+
+    assert workflow.side_engaged == {"left": False, "right": True}
+    assert workflow.state is WorkflowState.AUTO_RETURNING
+    assert output.left_torque is TorqueRequest.ENABLE
+    assert output.right_torque is TorqueRequest.ENABLE
+
+
+def test_recording_action_freezes_inactive_joints_but_keeps_both_grippers_live():
+    previous = action()
+    current = action()
+    for joint in range(1, 8):
+        current[f"left_joint_{joint}.pos"] = 10.0 + joint
+        current[f"right_joint_{joint}.pos"] = 20.0 + joint
+    current["left_gripper.pos"] = -12.0
+    current["right_gripper.pos"] = -34.0
+
+    filtered = filter_recording_action(
+        current,
+        previous,
+        {"left": False, "right": True},
+    )
+
+    for joint in range(1, 8):
+        assert filtered[f"left_joint_{joint}.pos"] == 0.0
+        assert filtered[f"right_joint_{joint}.pos"] == 20.0 + joint
+    assert filtered["left_gripper.pos"] == -12.0
+    assert filtered["right_gripper.pos"] == -34.0
 
 
 def test_joint_motion_over_two_degrees_restarts_auto_return_quiet_detection():

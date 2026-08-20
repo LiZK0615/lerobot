@@ -15,6 +15,7 @@ from lerobot.scripts.lerobot_openarm_mini_ros2_teleop import (
     PresetMotion,
     build_bimanual_datagram,
     load_preset_config,
+    ros_positions_to_mapped_action,
     starting_sequence,
 )
 
@@ -81,8 +82,15 @@ class JointIdleDetector:
     def reset(self) -> None:
         self._samples.clear()
 
-    def update(self, positions: Mapping[str, float], now: float) -> bool:
-        values = tuple(float(positions[name]) for name in JOINT_ACTION_NAMES)
+    def update(
+        self,
+        positions: Mapping[str, float],
+        now: float,
+        joint_names: tuple[str, ...] = JOINT_ACTION_NAMES,
+    ) -> bool:
+        if not joint_names:
+            raise ValueError("joint_names must not be empty")
+        values = tuple(float(positions[name]) for name in joint_names)
         self._samples.append((float(now), values))
         cutoff = float(now) - self.duration_sec
         while len(self._samples) > 1 and self._samples[1][0] <= cutoff:
@@ -101,6 +109,7 @@ class CollectionTeleopWorkflow:
         self.operator_engaged = False
         self.side_engaged = dict.fromkeys(SIDES, False)
         self.gripper_open = dict.fromkeys(SIDES, False)
+        self.both_closed_since: float | None = None
         self.idle_detector = JointIdleDetector(
             preset_config.auto_return_idle_duration_sec,
             preset_config.auto_return_idle_joint_delta_deg,
@@ -129,6 +138,7 @@ class CollectionTeleopWorkflow:
             self.operator_engaged = False
             self.side_engaged = dict.fromkeys(SIDES, False)
             self.gripper_open = dict.fromkeys(SIDES, False)
+            self.both_closed_since = None
             self.idle_detector.reset()
             self.state = WorkflowState.RECORDING_MANUAL
             return WorkflowOutput(
@@ -144,6 +154,7 @@ class CollectionTeleopWorkflow:
             self.operator_engaged = False
             self.side_engaged = dict.fromkeys(SIDES, False)
             self.gripper_open = dict.fromkeys(SIDES, False)
+            self.both_closed_since = None
             self.idle_detector.reset()
             self.state = WorkflowState.RESETTING_DISCARD
             return WorkflowOutput(
@@ -225,6 +236,7 @@ class CollectionTeleopWorkflow:
             self.gripper_open = current_gripper_open
 
             if any(current_gripper_open.values()):
+                self.both_closed_since = None
                 self.idle_detector.reset()
                 return WorkflowOutput(
                     goal=goal,
@@ -232,15 +244,29 @@ class CollectionTeleopWorkflow:
                     right_torque=right_torque,
                 )
             if not self.operator_engaged:
+                self.both_closed_since = None
                 self.idle_detector.reset()
                 return WorkflowOutput(
                     goal=self.motion.step(current, now),
                     left_torque=left_torque,
                     right_torque=right_torque,
                 )
-            if both_just_closed:
+            if both_just_closed or self.both_closed_since is None:
+                self.both_closed_since = float(now)
                 self.idle_detector.reset()
-            if self.idle_detector.update(current, now):
+            engaged_joint_names = tuple(
+                f"{side}_{joint}.pos"
+                for side in SIDES
+                if self.side_engaged[side]
+                for joint in JOINT_NAMES
+            )
+            stable = self.idle_detector.update(current, now, engaged_joint_names)
+            closed_elapsed = float(now) - self.both_closed_since
+            if (
+                closed_elapsed >= self.config.auto_return_idle_duration_sec
+                and stable
+                and self._both_j1_near_ready(current)
+            ):
                 self.motion.start_direct_ready(current, now)
                 self.state = WorkflowState.AUTO_RETURNING
                 return WorkflowOutput(
@@ -267,6 +293,31 @@ class CollectionTeleopWorkflow:
     def _gripper_is_open(self, current: Mapping[str, float], side: str) -> bool:
         threshold = self.config.gripper_closed_threshold_deg
         return float(current[f"{side}_gripper.pos"]) < threshold
+
+    def _both_j1_near_ready(self, current: Mapping[str, float]) -> bool:
+        ready = ros_positions_to_mapped_action(self.config.waypoints["table_ready"])
+        tolerance_deg = math.degrees(self.config.auto_return_j1_tolerance_rad)
+        return all(
+            abs(float(current[f"{side}_joint_1.pos"]) - ready[f"{side}_joint_1.pos"])
+            <= tolerance_deg
+            for side in SIDES
+        )
+
+
+def filter_recording_action(
+    current: Mapping[str, float],
+    previous_sent: Mapping[str, float],
+    side_engaged: Mapping[str, bool],
+) -> dict[str, float]:
+    """Freeze inactive arm joints while keeping both grippers live."""
+    action = {name: float(value) for name, value in current.items()}
+    for side in SIDES:
+        if side_engaged[side]:
+            continue
+        for joint in JOINT_NAMES:
+            key = f"{side}_{joint}.pos"
+            action[key] = float(previous_sent[key])
+    return action
 
 
 def _joint_goals(action: Mapping[str, float], side: str) -> dict[str, float]:
@@ -357,6 +408,7 @@ def run_teleop_worker(
             raise RuntimeError("both openarms_mini_left/right calibration files are required")
         teleop.connect(calibrate=False)
         current = teleop.get_action()
+        last_sent_action = dict(current)
         apply_output(workflow.initialize(current, time.monotonic()), current)
         publish_status(force=True)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
@@ -384,10 +436,23 @@ def run_teleop_worker(
 
                 output = workflow.tick(current, time.monotonic())
                 apply_output(output, current)
+                if workflow.state in {
+                    WorkflowState.RECORDING_MANUAL,
+                    WorkflowState.AUTO_RETURNING,
+                    WorkflowState.AWAITING_DECISION,
+                }:
+                    sent_action = filter_recording_action(
+                        current,
+                        last_sent_action,
+                        workflow.side_engaged,
+                    )
+                else:
+                    sent_action = dict(current)
                 udp_socket.sendto(
-                    build_bimanual_datagram(current, sequence, time.monotonic_ns()),
+                    build_bimanual_datagram(sent_action, sequence, time.monotonic_ns()),
                     (config.host, config.udp_port),
                 )
+                last_sent_action = sent_action
                 sequence += 1
                 publish_status(fatal_error)
                 if workflow.state is WorkflowState.SHUTDOWN_COMPLETE:

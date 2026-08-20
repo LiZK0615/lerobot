@@ -428,7 +428,8 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
                 auto_return_started_ns = now_ns
                 auto_return_completed = False
                 print(
-                    "[AUTO_RETURNING] grippers closed and leader joints stable; "
+                    "[AUTO_RETURNING] grippers closed for the configured duration, "
+                    "active leader joints stable, and both J1 joints near table_ready; "
                     "recording continues while both arms return",
                     flush=True,
                 )

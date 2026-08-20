@@ -14,6 +14,7 @@ target_tolerance_rad: 0.10
 gripper_closed_threshold_deg: -3.0
 auto_return_idle_duration_sec: 0.5
 auto_return_idle_joint_delta_deg: 2.0
+auto_return_j1_tolerance_rad: 0.5
 
 prepare_sequence:
   - table_clearance
