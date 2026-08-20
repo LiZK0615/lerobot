@@ -45,7 +45,7 @@ def test_default_clutch_thresholds_are_loaded_from_preset_yaml():
     config = load_preset_config(DEFAULT_PRESET_CONFIG_PATH)
     assert config.target_tolerance_rad == 0.10
     assert config.gripper_closed_threshold_deg == -3.0
-    assert config.auto_return_idle_duration_sec == 0.5
+    assert config.auto_return_idle_duration_sec == 1.0
     assert config.auto_return_idle_joint_delta_deg == 2.0
     assert config.auto_return_j1_tolerance_rad == 0.5
 
@@ -127,11 +127,11 @@ def test_idle_timer_starts_only_after_both_grippers_close():
     closed = dict(ready)
     closed_output = workflow.tick(closed, now + 10.1)
     assert closed_output.right_torque is TorqueRequest.UNCHANGED
-    before_timeout = workflow.tick(closed, now + 10.59)
+    before_timeout = workflow.tick(closed, now + 11.09)
     assert before_timeout.left_torque is TorqueRequest.UNCHANGED
     assert before_timeout.right_torque is TorqueRequest.UNCHANGED
     assert workflow.state is WorkflowState.RECORDING_MANUAL
-    output = workflow.tick(closed, now + 10.61)
+    output = workflow.tick(closed, now + 11.11)
 
     assert workflow.state is WorkflowState.AUTO_RETURNING
     assert output.left_torque is TorqueRequest.ENABLE
@@ -152,15 +152,15 @@ def test_closed_and_quiet_far_j1_blocks_return_until_j1_is_near_ready():
     closed_output = workflow.tick(far, now + 0.2)
     assert closed_output.left_torque is TorqueRequest.UNCHANGED
     assert closed_output.right_torque is TorqueRequest.UNCHANGED
-    output = workflow.tick(far, now + 1.0)
+    output = workflow.tick(far, now + 1.3)
 
     assert workflow.state is WorkflowState.RECORDING_MANUAL
     assert output.left_torque is TorqueRequest.UNCHANGED
     assert output.right_torque is TorqueRequest.UNCHANGED
 
-    workflow.tick(ready, now + 1.1)
-    assert workflow.tick(ready, now + 1.59).left_torque is TorqueRequest.UNCHANGED
-    output = workflow.tick(ready, now + 1.61)
+    workflow.tick(ready, now + 1.4)
+    assert workflow.tick(ready, now + 2.39).left_torque is TorqueRequest.UNCHANGED
+    output = workflow.tick(ready, now + 2.41)
 
     assert workflow.state is WorkflowState.AUTO_RETURNING
     assert output.left_torque is TorqueRequest.ENABLE
@@ -179,8 +179,8 @@ def test_inactive_arm_vibration_does_not_block_active_arm_idle_detection():
 
     left_vibration = dict(ready)
     left_vibration["left_joint_2.pos"] += 15.0
-    workflow.tick(left_vibration, now + 0.4)
-    output = workflow.tick(ready, now + 0.71)
+    workflow.tick(left_vibration, now + 0.6)
+    output = workflow.tick(ready, now + 1.21)
 
     assert workflow.side_engaged == {"left": False, "right": True}
     assert workflow.state is WorkflowState.AUTO_RETURNING
@@ -222,10 +222,10 @@ def test_joint_motion_over_two_degrees_restarts_auto_return_quiet_detection():
     moved = dict(ready)
     moved["left_joint_1.pos"] += 2.1
     workflow.tick(moved, now + 0.4)
-    output = workflow.tick(moved, now + 0.61)
+    output = workflow.tick(moved, now + 1.39)
     assert output.left_torque is TorqueRequest.UNCHANGED
     assert output.right_torque is TorqueRequest.UNCHANGED
-    output = workflow.tick(moved, now + 0.91)
+    output = workflow.tick(moved, now + 1.41)
 
     assert output.left_torque is TorqueRequest.ENABLE
     assert output.right_torque is TorqueRequest.ENABLE
@@ -240,9 +240,9 @@ def test_automatic_return_holds_ready_until_finish_decision():
     opened["left_gripper.pos"] = -20.0
     workflow.tick(opened, now + 0.1)
     workflow.tick(ready, now + 0.2)
-    workflow.tick(ready, now + 0.71)
+    workflow.tick(ready, now + 1.21)
 
-    finish = now + 0.71 + workflow.motion.segment_duration_sec
+    finish = now + 1.21 + workflow.motion.segment_duration_sec
     workflow.tick(ready, finish)
     assert workflow.state is WorkflowState.AWAITING_DECISION
 

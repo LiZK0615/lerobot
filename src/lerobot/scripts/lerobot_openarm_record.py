@@ -165,7 +165,7 @@ class RecorderFeedback:
             print(f"[RECORDING] episode={status.episode_index} started", flush=True)
             print(
                 "[RECORDING] opening a gripper releases its leader arm for this episode; "
-                "closing it stays torque-free, and closing both starts the 0.5s stillness timer",
+                "closing it stays torque-free, and closing both starts the configured stillness timer",
                 flush=True,
             )
             self._last_progress_ns = now_ns
