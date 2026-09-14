@@ -17,16 +17,19 @@ class DatasetCompatibilityError(ValueError):
     pass
 
 
-def build_features() -> dict[str, dict[str, Any]]:
+def build_features(include_nir: bool = False) -> dict[str, dict[str, Any]]:
     vector = {"dtype": "float32", "shape": (16,), "names": list(JOINT_NAMES)}
     video = {"dtype": "video", "shape": (480, 640, 3), "names": ["height", "width", "channels"]}
-    return {
+    features = {
         "observation.images.head": dict(video),
         "observation.images.left_wrist": dict(video),
         "observation.images.right_wrist": dict(video),
         "observation.state": dict(vector),
         "action": dict(vector),
     }
+    if include_nir:
+        features["observation.images.head_nir"] = dict(video)
+    return features
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -47,13 +50,14 @@ class DatasetSink:
     def __init__(
         self, root: Path, repo_id: str, dataset: Any | None = None, fps: int = 30,
         min_episode_sec: float = 1.0, max_episode_sec: float = 120.0,
-        image_writer_threads: int = 4,
+        image_writer_threads: int = 4, include_nir: bool = False,
     ) -> None:
         self.root = root
         self.repo_id = repo_id
         self.fps = fps
         self.min_episode_sec = min_episode_sec
         self.max_episode_sec = max_episode_sec
+        self.include_nir = include_nir
         self.image_writer_threads = image_writer_threads
         self.root.mkdir(parents=True, exist_ok=True)
         self.dataset = dataset if dataset is not None else self._open_dataset()
@@ -69,8 +73,10 @@ class DatasetSink:
                 image_writer_threads=self.image_writer_threads,
                 video_backend="pyav",
             )
-            expected = build_features()
+            expected = build_features(self.include_nir)
             differences = []
+            if ("observation.images.head_nir" in dataset.meta.features) != self.include_nir:
+                differences.append("NIR schema differs; use a new dataset name")
             if dataset.meta.fps != self.fps:
                 differences.append(f"fps: {dataset.meta.fps} != {self.fps}")
             for key, feature in expected.items():
@@ -92,7 +98,7 @@ class DatasetSink:
         # LeRobot create requires the destination not to exist.
         self.root.rmdir()
         return LeRobotDataset.create(
-            self.repo_id, self.fps, build_features(), root=self.root,
+            self.repo_id, self.fps, build_features(self.include_nir), root=self.root,
             robot_type="openarm_v1_bimanual", use_videos=True,
             image_writer_threads=self.image_writer_threads, video_backend="pyav"
         )
@@ -113,17 +119,29 @@ class DatasetSink:
     def add_sample(self, sample: SynchronizedSample) -> None:
         if self._episode_index is None or self._task is None:
             raise RuntimeError("no active episode")
-        self.dataset.add_frame({
+        frame = {
             "observation.images.head": sample.head.image,
             "observation.images.left_wrist": sample.left_wrist.image,
             "observation.images.right_wrist": sample.right_wrist.image,
             "observation.state": np.asarray(sample.state.values, dtype=np.float32),
             "action": np.asarray(sample.action.values, dtype=np.float32),
             "task": self._task,
-        })
+        }
+        if self.include_nir:
+            if sample.head.nir_image is None or sample.head.nir_timestamp_us is None:
+                raise ValueError("NIR required but missing from synchronized head bundle")
+            frame["observation.images.head_nir"] = sample.head.nir_image
+        self.dataset.add_frame(frame)
         self._diagnostics.append({
             "sample_monotonic_ns": sample.sample_monotonic_ns,
             "head_device_timestamp_us": sample.head.device_timestamp_us,
+            **({
+                "head_nir_device_timestamp_us": sample.head.nir_timestamp_us,
+                "head_rgb_nir_delta_us": sample.head.nir_timestamp_us - sample.head.device_timestamp_us,
+                "head_nir_exposure": sample.head.nir_exposure,
+                "head_nir_gain": sample.head.nir_gain,
+                "head_nir_laser_status": sample.head.nir_laser_status,
+            } if self.include_nir else {}),
             "left_wrist_device_timestamp_us": sample.left_wrist.device_timestamp_us,
             "right_wrist_device_timestamp_us": sample.right_wrist.device_timestamp_us,
             "head_mapped_monotonic_ns": sample.head.mapped_monotonic_ns,

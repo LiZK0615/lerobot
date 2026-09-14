@@ -147,6 +147,13 @@ class SampleSynchronizer:
                 return None
             selected[name] = candidate
         times = [frame.mapped_monotonic_ns for frame in selected.values()]
+        head = selected["head"]
+        if head.nir_timestamp_us is not None:
+            nir_time = head.mapped_monotonic_ns + (head.nir_timestamp_us - head.device_timestamp_us) * 1000
+            if abs(nir_time - sample_monotonic_ns) > self.camera_age_ns:
+                self._fail(sample_monotonic_ns, "head NIR stale", "head_nir_stale")
+                return None
+            times.append(nir_time)
         skew_ns = max(times) - min(times)
         if skew_ns > self.camera_skew_ns:
             self._fail(

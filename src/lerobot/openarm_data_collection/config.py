@@ -71,6 +71,8 @@ def load_camera_rig(path: Path) -> dict[str, OrbbecCameraConfig]:
         name: OrbbecCameraConfig(fps=30, width=640, height=480, **values)
         for name, values in cameras.items()
     }
+    if any(config.nir_side is not None for name, config in configs.items() if name != "head"):
+        raise ValueError("NIR is only supported on the head camera")
     serials = [config.serial_number for config in configs.values()]
     if len(set(serials)) != len(serials):
         raise ValueError("camera serial numbers must be unique")

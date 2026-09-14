@@ -380,6 +380,7 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
         cfg.dataset_path, repo_id, fps=cfg.fps,
         min_episode_sec=cfg.min_episode_sec, max_episode_sec=cfg.max_episode_sec,
         image_writer_threads=cfg.image_writer_threads,
+        include_nir=camera_configs["head"].nir_side is not None,
     )
     session = RecordingSession(
         sink, synchronizer, cfg.task, cfg.fps,
@@ -592,6 +593,8 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
                     if packet is None or packet.sequence == last_camera_sequence[name]: continue
                     last_camera_sequence[name] = packet.sequence
                     latest_images[name] = packet.image
+                    if name == "head" and packet.nir_image is not None:
+                        latest_images["head_nir"] = packet.nir_image
                     camera_rates.update(name, packet.sequence, packet.received_monotonic_ns)
                     try:
                         mapped, _time_source = map_camera_timestamp(
@@ -704,8 +707,15 @@ def run(cli_cfg: OpenArmRecordCliConfig) -> None:
         finally:
             preview.close()
             receiver.close()
+            disconnect_errors = []
             for camera in cameras.values():
-                if camera.is_connected: camera.disconnect()
+                try:
+                    if camera.is_connected:
+                        camera.disconnect()
+                except Exception as error:
+                    disconnect_errors.append(str(error))
+            if disconnect_errors:
+                raise RuntimeError("camera shutdown errors: " + "; ".join(disconnect_errors))
 
 
 @draccus.wrap()

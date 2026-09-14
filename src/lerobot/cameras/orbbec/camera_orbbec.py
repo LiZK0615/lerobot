@@ -67,6 +67,11 @@ class RawOrbbecFrame:
     device_timestamp_us: int
     system_timestamp_us: int | None
     received_monotonic_ns: int
+    nir_image: NDArray[np.uint8] | None = None
+    nir_timestamp_us: int | None = None
+    nir_exposure: int | None = None
+    nir_gain: int | None = None
+    nir_laser_status: int | None = None
 
 
 @dataclass(frozen=True)
@@ -79,12 +84,39 @@ class OrbbecFrame:
     received_monotonic_ns: int
     mapped_monotonic_ns: int | None
     sequence: int
+    nir_image: NDArray[np.uint8] | None = None
+    nir_timestamp_us: int | None = None
+    nir_exposure: int | None = None
+    nir_gain: int | None = None
+    nir_laser_status: int | None = None
 
 
 class SdkAdapter(Protocol):
     def list_devices(self) -> dict[str, dict[str, str]]: ...
     def start(self, config: OrbbecCameraConfig, callback: Any) -> Any: ...
     def stop(self, pipeline: Any) -> None: ...
+
+
+
+
+def _restore_controls(device: Any, ob: Any, controls: dict[str, Any]) -> None:
+    errors = []
+    for name, value in controls.items():
+        prop = getattr(ob.OBPropertyID, name)
+        setter = device.set_bool_property if name.endswith("BOOL") else device.set_int_property
+        try:
+            setter(prop, value)
+        except Exception as error:
+            errors.append(f"{name}: {error}")
+    for name, value in controls.items():
+        getter = device.get_bool_property if name.endswith("BOOL") else device.get_int_property
+        try:
+            if getter(getattr(ob.OBPropertyID, name)) != value:
+                errors.append(f"{name}: restoration readback mismatch")
+        except Exception as error:
+            errors.append(f"{name}: {error}")
+    if errors:
+        raise RuntimeError("camera settings restoration failed: " + "; ".join(errors))
 
 
 class _PyOrbbecAdapter:
@@ -96,6 +128,7 @@ class _PyOrbbecAdapter:
 
         self._ob = ob
         self._context = ob.Context()
+        self._controls: dict[int, tuple[Any, dict[str, Any]]] = {}
 
     def list_devices(self) -> dict[str, dict[str, str]]:
         devices: dict[str, dict[str, str]] = {}
@@ -122,11 +155,47 @@ class _PyOrbbecAdapter:
         profiles = pipeline.get_stream_profile_list(sensor_type)
         profile = _select_video_profile(profiles, ob.OBFormat, config.width, config.height, config.fps)
         pipeline_config.enable_stream(profile)
+        nir_frame_type = None
+        if config.nir_side is not None:
+            nir_sensor = getattr(ob.OBSensorType, f"{config.nir_side.upper()}_IR_SENSOR")
+            nir_frame_type = getattr(ob.OBFrameType, f"{config.nir_side.upper()}_IR_FRAME")
+            nir_profiles = pipeline.get_stream_profile_list(nir_sensor)
+            nir_profile = nir_profiles.get_video_stream_profile(config.width, config.height, ob.OBFormat.Y8, config.fps)
+            pipeline_config.enable_stream(nir_profile)
+            pipeline.enable_frame_sync()
+            pipeline_config.set_frame_aggregate_output_mode(ob.OBFrameAggregateOutputMode.FULL_FRAME_REQUIRE)
+        controls: dict[str, Any] = {}
+        # No preset changes for the head in the supplied recording config.
+        if config.ldm_enabled is not None:
+            for name in ("OB_PROP_LASER_CONTROL_INT", "OB_PROP_LASER_ON_OFF_PATTERN_INT", "OB_PROP_FRAME_INTERLEAVE_ENABLE_BOOL"):
+                prop = getattr(ob.OBPropertyID, name, None)
+                if prop is None or not device.is_property_supported(prop, ob.OBPermissionType.PERMISSION_READ_WRITE):
+                    raise RuntimeError(f"required LDM control unavailable: {name}")
+                getter = device.get_bool_property if name.endswith("BOOL") else device.get_int_property
+                controls[name] = getter(prop)
 
         def on_frames(frames: Any) -> None:
             frame = frames.get_frame_by_type(frame_type)
             if frame is None:
                 return
+            nir_values: dict[str, Any] = {}
+            if nir_frame_type is not None:
+                nir = frames.get_frame_by_type(nir_frame_type)
+                if nir is None:
+                    return
+                nir_ts = int(nir.get_timestamp_us())
+                if abs(nir_ts - int(frame.get_timestamp_us())) > config.nir_pair_max_ms * 1000:
+                    return  # Unpaired bundles cannot become valid training samples.
+                nir_video = nir.as_video_frame()
+                nir_image = np.frombuffer(nir.get_data(), dtype=np.uint8).copy().reshape(
+                    int(nir_video.get_height()), int(nir_video.get_width())
+                )
+                nir_values = {"nir_image": np.repeat(nir_image[..., None], 3, axis=2), "nir_timestamp_us": nir_ts}
+                for key, metadata_name in (("nir_exposure", "EXPOSURE"), ("nir_gain", "GAIN"), ("nir_laser_status", "LASER_STATUS")):
+                    metadata = getattr(ob.OBFrameMetadataType, metadata_name, None)
+                    nir_values[key] = int(nir.get_metadata_value(metadata)) if metadata is not None and nir.has_metadata(metadata) else None
+                if config.ldm_enabled is not None and nir_values["nir_laser_status"] != int(config.ldm_enabled):
+                    return  # Startup transients/mismatches are excluded, not written as NIR.
             video = frame.as_video_frame()
             data = np.frombuffer(frame.get_data(), dtype=np.uint8).copy()
             height = int(video.get_height())
@@ -149,14 +218,34 @@ class _PyOrbbecAdapter:
                     device_timestamp_us=int(frame.get_timestamp_us()),
                     system_timestamp_us=int(frame.get_system_timestamp_us()),
                     received_monotonic_ns=time.monotonic_ns(),
+                    **nir_values,
                 )
             )
 
-        pipeline.start(pipeline_config, on_frames)
+        try:
+            if controls:
+                device.set_bool_property(ob.OBPropertyID.OB_PROP_FRAME_INTERLEAVE_ENABLE_BOOL, False)
+                device.set_int_property(ob.OBPropertyID.OB_PROP_LASER_ON_OFF_PATTERN_INT, 0)
+                device.set_int_property(ob.OBPropertyID.OB_PROP_LASER_CONTROL_INT, int(config.ldm_enabled))
+                if device.get_int_property(ob.OBPropertyID.OB_PROP_LASER_CONTROL_INT) != int(config.ldm_enabled):
+                    raise RuntimeError("LDM readback mismatch")
+                print(f"[CAMERA] {config.serial_number} LDM={config.ldm_enabled}; restore snapshot={controls}", flush=True)
+            pipeline.start(pipeline_config, on_frames)
+        except BaseException:
+            try:
+                pipeline.stop()
+            finally:
+                _restore_controls(device, ob, controls)
+            raise
+        self._controls[id(pipeline)] = (device, controls)
         return pipeline
 
     def stop(self, pipeline: Any) -> None:
-        pipeline.stop()
+        device, controls = self._controls.pop(id(pipeline))
+        try:
+            pipeline.stop()
+        finally:
+            _restore_controls(device, self._ob, controls)
 
 
 class OrbbecSdkRuntime:
@@ -247,6 +336,11 @@ class OrbbecCamera(Camera):
             received_monotonic_ns=raw.received_monotonic_ns,
             mapped_monotonic_ns=None,
             sequence=self._sequence,
+            nir_image=raw.nir_image,
+            nir_timestamp_us=raw.nir_timestamp_us,
+            nir_exposure=raw.nir_exposure,
+            nir_gain=raw.nir_gain,
+            nir_laser_status=raw.nir_laser_status,
         )
         self._sequence += 1
         with self._condition:

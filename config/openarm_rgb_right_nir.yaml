@@ -1,0 +1,20 @@
+cameras:
+  head:
+    serial_number: "CP96563000KZ"
+    model: gemini_336
+    selected_color_stream: color
+    nir_side: right
+    ldm_enabled: true
+    nir_pair_max_ms: 20.0
+
+  left_wrist:
+    serial_number: "CV2T6610001B"
+    model: gemini_305
+    preset: "Dual Color Streams"
+    selected_color_stream: left_color
+
+  right_wrist:
+    serial_number: "CV2T661000LS"
+    model: gemini_305
+    preset: "Dual Color Streams"
+    selected_color_stream: right_color

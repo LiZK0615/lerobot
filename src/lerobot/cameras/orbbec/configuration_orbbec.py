@@ -15,9 +15,18 @@ class OrbbecCameraConfig(CameraConfig):
     preset: str | None = None
     color_mode: ColorMode = ColorMode.RGB
     warmup_s: float = 1.0
+    nir_side: Literal["left", "right"] | None = None
+    ldm_enabled: bool | None = None
+    nir_pair_max_ms: float = 20.0
 
     def __post_init__(self) -> None:
         self.color_mode = ColorMode(self.color_mode)
+        if self.nir_side not in (None, "left", "right"):
+            raise ValueError("nir_side must be left or right")
+        if self.model != "gemini_336" and (self.nir_side is not None or self.ldm_enabled is not None):
+            raise ValueError("NIR/LDM controls require Gemini 336")
+        if self.nir_pair_max_ms <= 0:
+            raise ValueError("nir_pair_max_ms must be positive")
         if not self.serial_number.strip():
             raise ValueError("serial_number must not be empty")
         if self.model not in ("gemini_336", "gemini_305"):

@@ -34,7 +34,8 @@ def compose_preview(
     cv2_module: Any = cv2,
 ) -> NDArray[np.uint8]:
     panels = []
-    for name in CAMERA_NAMES:
+    names = ("head", "head_nir", "left_wrist", "right_wrist") if "head_nir" in frames else CAMERA_NAMES
+    for name in names:
         image = frames.get(name)
         if image is None:
             image = np.zeros((480, 640, 3), dtype=np.uint8)
