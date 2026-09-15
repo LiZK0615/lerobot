@@ -41,6 +41,7 @@ import torch
 from lerobot.lerobot_types import PolicyAction
 from lerobot.policies import get_policy_class, make_pre_post_processors
 from lerobot.processor import PolicyProcessorPipeline
+from lerobot.processor.rename_processor import RenameObservationsProcessorStep
 from lerobot.transport import (
     services_pb2,  # type: ignore
     services_pb2_grpc,  # type: ignore
@@ -94,7 +95,17 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
     @property
     def policy_image_features(self):
-        return self.policy.config.image_features
+        # Raw images are resized before the preprocessor applies camera renaming.
+        # Resolve their dimensions using the effective checkpoint/client mapping.
+        features = dict(self.policy.config.image_features)
+        if self.preprocessor is not None:
+            for step in reversed(self.preprocessor.steps):
+                if isinstance(step, RenameObservationsProcessorStep):
+                    target_features = features.copy()
+                    for source, target in step.rename_map.items():
+                        if target in target_features:
+                            features[source] = target_features[target]
+        return features
 
     def _reset_server(self) -> None:
         """Flushes server state when new client connects."""
