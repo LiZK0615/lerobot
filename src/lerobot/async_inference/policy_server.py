@@ -154,13 +154,16 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         # Load preprocessor and postprocessor, overriding device to match requested device
         device_override = {"device": self.device}
+        preprocessor_overrides = {"device_processor": device_override}
+        # Keep checkpoint camera mappings unless the client supplies an override.
+        if policy_specs.rename_map:
+            preprocessor_overrides["rename_observations_processor"] = {
+                "rename_map": policy_specs.rename_map
+            }
         self.preprocessor, self.postprocessor = make_pre_post_processors(
             self.policy.config,
             pretrained_path=policy_specs.pretrained_name_or_path,
-            preprocessor_overrides={
-                "device_processor": device_override,
-                "rename_observations_processor": {"rename_map": policy_specs.rename_map},
-            },
+            preprocessor_overrides=preprocessor_overrides,
             postprocessor_overrides={"device_processor": device_override},
         )
 
